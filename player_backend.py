@@ -40,6 +40,19 @@ class MPVManager:
     def title(self):
         # Extract title from metadata or filename
         metadata = self.player.metadata
-        if metadata and 'title' in metadata:
-            return metadata['title']
-        return os.path.basename(self.player.path) if self.player.path else "No Track"
+        if metadata:
+            if 'title' in metadata:
+                return metadata['title']
+            if 'icy-title' in metadata: # For streams/some files
+                return metadata['icy-title']
+        return os.path.basename(self.player.path) if self.player.path else "No Track Playing"
+
+    @property
+    def artist(self):
+        metadata = self.player.metadata
+        if metadata:
+            if 'artist' in metadata:
+                return metadata['artist']
+            if 'album_artist' in metadata:
+                return metadata['album_artist']
+        return "Unknown Artist"

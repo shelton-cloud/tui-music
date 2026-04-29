@@ -16,7 +16,6 @@ class TrackItem(ListItem):
 
     def compose(self) -> ComposeResult:
         yield Label(self.title)
-
 class NowPlaying(Static):
     CASSETTE = r"""
   ________________
@@ -29,17 +28,20 @@ class NowPlaying(Static):
     def __init__(self):
         super().__init__()
         self.track_title = "No Track Playing"
+        self.track_artist = ""
 
     def compose(self) -> ComposeResult:
         with Horizontal():
             yield Static(self.CASSETTE, id="cassette-art")
             with Vertical(id="track-info-container"):
                 yield Label(self.track_title, id="track-title")
+                yield Label(self.track_artist, id="track-artist")
                 yield ProgressBar(total=100, show_percentage=True, id="track-progress")
                 yield Label("00:00 / 00:00", id="track-time")
 
-    def update_info(self, title, progress, time_str):
+    def update_info(self, title, artist, progress, time_str):
         self.query_one("#track-title", Label).update(title)
+        self.query_one("#track-artist", Label).update(artist)
         self.query_one("#track-progress", ProgressBar).progress = progress
         self.query_one("#track-time", Label).update(time_str)
 
@@ -93,6 +95,7 @@ class MusicPlayerApp(App):
         border: solid #00e5ff;
         padding: 1;
         background: #16142a;
+        layout: horizontal;
     }
     #status-bar {
         height: 1;
@@ -111,6 +114,9 @@ class MusicPlayerApp(App):
     #track-title {
         text-style: bold;
         color: #00e5ff;
+    }
+    #track-artist {
+        color: #b14dff;
         margin-bottom: 1;
     }
     ProgressBar {
@@ -228,9 +234,9 @@ class MusicPlayerApp(App):
 
     def update_now_playing_title(self):
         title = self.player.title
-        now_playing = self.query_one(NowPlaying)
-        now_playing.track_title = title # Simple update for now
+        artist = self.player.artist
         self.query_one("#track-title", Label).update(title)
+        self.query_one("#track-artist", Label).update(artist)
 
     def update_progress(self, time_pos):
         if time_pos is None: return
@@ -239,7 +245,7 @@ class MusicPlayerApp(App):
             percent = (time_pos / duration) * 100
             time_str = f"{self.format_time(time_pos)} / {self.format_time(duration)}"
             now_playing = self.query_one(NowPlaying)
-            now_playing.update_info(self.player.title, percent, time_str)
+            now_playing.update_info(self.player.title, self.player.artist, percent, time_str)
             
             # Auto-next
             if time_pos >= duration - 0.5:
