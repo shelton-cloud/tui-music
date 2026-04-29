@@ -3,7 +3,8 @@ import os
 
 class MPVManager:
     def __init__(self, on_metadata_change=None, on_tick=None):
-        self.player = mpv.MPV(ytdl=True, video=False)
+        # terminal=False and log_handler=None ensures mpv doesn't spam the TUI's stdout
+        self.player = mpv.MPV(ytdl=True, video=False, terminal=False)
         self.on_metadata_change = on_metadata_change
         self.on_tick = on_tick
         
