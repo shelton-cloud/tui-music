@@ -3,8 +3,15 @@ import os
 
 class MPVManager:
     def __init__(self, on_metadata_change=None, on_tick=None):
-        # terminal=False and log_handler=None ensures mpv doesn't spam the TUI's stdout
-        self.player = mpv.MPV(ytdl=True, video=False, terminal=False)
+        print("DEBUG: Initializing MPV...")
+        try:
+            # Let MPV autodetect the audio output (ao) for better compatibility
+            self.player = mpv.MPV(ytdl=True, video=False, terminal=False)
+            print(f"DEBUG: MPV Initialized. Driver: {self.player.ao}")
+        except Exception as e:
+            print(f"DEBUG: MPV Initialization failed: {e}")
+            raise
+
         self.on_metadata_change = on_metadata_change
         self.on_tick = on_tick
         
@@ -19,9 +26,9 @@ class MPVManager:
             if self.on_tick:
                 self.on_tick(value)
 
-    def play(self, file_path):
-        if os.path.exists(file_path):
-            self.player.play(file_path)
+    def play(self, source):
+        # source can be a local file path or a URL
+        self.player.play(source)
 
     def toggle_pause(self):
         self.player.pause = not self.player.pause

@@ -1,32 +1,31 @@
-# TUI Music Player
+# TUI Music Player 🎵
 
-A lightweight, colorful TUI music player built with Python, Textual, and MPV.
+A retro-styled terminal music player that connects to your NAS and streams from YouTube Music.
 
 ## Features
-- **File Browser:** Navigate your local library or NAS mounts.
-- **Queue System:** Add tracks to a live queue by selecting them in the browser.
-- **Now Playing:** Real-time progress bar and track metadata.
-- **Async Backend:** Powered by `python-mpv` for high-quality, non-blocking playback.
+- **NAS Integration**: Browse your local music library via a directory tree.
+- **YouTube Music Streaming**: Search and queue songs directly from YouTube Music.
+- **Retro UI**: CRT-inspired colors and a cassette tape animation.
+- **MPV Powered**: High-quality playback with support for various audio formats and streaming.
 
-## Setup
-1. **Install MPV:** (System dependency)
-   ```bash
-   brew install mpv
-   ```
-2. **Setup Environment:**
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   pip install -r requirements.txt
-   ```
-3. **Run:**
-   ```bash
-   python app.py
-   ```
+## Prerequisites
+- **Python 3.10+**
+- **mpv**: Required for audio playback. Install via `brew install mpv` (macOS) or `sudo apt install mpv` (Linux).
+- **yt-dlp**: Required for streaming.
 
-## Keybindings
-- `space`: Play / Pause
-- `n`: Next track in queue
-- `p`: Previous track in queue
-- `enter`: (In Browser) Add file to queue
-- `q`: Quit app
+## Installation
+1. Clone the repository.
+2. Create a virtual environment: `python -m venv venv`.
+3. Install dependencies: `./venv/bin/pip install -r requirements.txt`.
+4. Run the app: `./venv/bin/python app.py`.
+
+## Controls
+- `SPACE`: Play/Pause
+- `N`: Next Track
+- `P`: Previous Track
+- `/`: Search YouTube Music
+- `Q`: Quit
+
+## Configuration
+- Update `scanner.py` with your NAS mount path and run it to index local files into `songs.json`.
+- The player defaults to `./` if the NAS is not found.
