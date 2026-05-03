@@ -56,13 +56,13 @@ class SearchScreen(ModalScreen):
     #search-container {
         width: 80%;
         height: 80%;
-        background: #1a1b26;
-        border: thick #f92aad;
+        background: #282a36;
+        border: thick #ff79c6;
         padding: 1;
     }
     #search-results {
         height: 1fr;
-        border: solid #00e5ff;
+        border: solid #8be9fd;
         margin-top: 1;
     }
     """
@@ -73,11 +73,11 @@ class SearchScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="search-container"):
-            yield Label("SEARCH YOUTUBE MUSIC", id="search-title")
+            yield Label("󰍉 SEARCH YOUTUBE MUSIC", id="search-title")
             yield Input(placeholder="Search for a song...", id="search-input")
             yield Label("", id="search-status")
             yield ListView(id="search-results")
-            yield Label(" [ENTER] Search | [UP/DOWN] Select | [ESC] Close ", id="search-help", markup=False)
+            yield Label(" 󰐊 [ENTER] Search | 󰒭 [UP/DOWN] Select | 󰈆 [ESC] Close ", id="search-help", markup=False)
 
     @on(Input.Submitted)
     def perform_search(self, event: Input.Submitted):
@@ -106,7 +106,7 @@ class SearchScreen(ModalScreen):
 class NowPlaying(Static):
     CASSETTE_FRAME = [
         " ╔══════════════════╗ ",
-        " ║  TUI MUSIC PLAYER ║ ",
+        " ║  󰓠   NASA  TUI    ║ ",
         " ╟──┬────────────┬──╢ ",
         " ║  │ {left}      {right} │  ║ ",
         " ║  ╰────────────╯  ║ ",
@@ -135,8 +135,8 @@ class NowPlaying(Static):
     def update_cassette(self) -> None:
         reel = self.REEL_FRAMES[self.reel_index]
         # Mirror the reels for symmetry
-        left_reel = f"[bold #f92aad]{reel}[/]"
-        right_reel = f"[bold #f92aad]{reel}[/]"
+        left_reel = f"[bold #ff79c6]{reel}[/]"
+        right_reel = f"[bold #ff79c6]{reel}[/]"
         
         cassette_art = "\n".join(self.CASSETTE_FRAME).format(
             left=left_reel, 
@@ -167,45 +167,45 @@ class NowPlaying(Static):
 class MusicPlayerApp(App):
     CSS = """
     Screen {
-        background: #0b0914;
+        background: #282a36;
     }
     #main-container {
         height: 1fr;
     }
     #breadcrumb-bar {
-        background: #1a1b26;
-        color: #7dcfff;
+        background: #343746;
+        color: #8be9fd;
         padding: 0 1;
         height: 1;
         text-style: italic;
     }
     #queue-container {
         height: 60%;
-        border: solid #b14dff;
-        background: #131122;
+        border: solid #bd93f9;
+        background: #21222c;
     }
     #queue-header {
         text-style: bold;
-        color: #f92aad;
+        color: #ff79c6;
         padding: 0 1;
-        background: #1a1b26;
+        background: #343746;
     }
     NowPlaying {
         height: 40%;
         margin-top: 1;
-        border: solid #00e5ff;
+        border: solid #50fa7b;
         padding: 1;
-        background: #16142a;
+        background: #282a36;
         layout: horizontal;
     }
     #status-bar {
         height: 1;
-        background: #f92aad;
-        color: #0b0914;
+        background: #bd93f9;
+        color: #282a36;
         text-style: bold;
     }
     #cassette-art {
-        color: #f92aad;
+        color: #ff79c6;
         width: 25;
     }
     #track-info-container {
@@ -214,21 +214,21 @@ class MusicPlayerApp(App):
     }
     #track-title {
         text-style: bold;
-        color: #00e5ff;
+        color: #8be9fd;
     }
     #track-artist {
-        color: #b14dff;
+        color: #bd93f9;
         margin-bottom: 1;
     }
     ProgressBar {
         width: 100%;
     }
     ProgressBar > .progress-bar--bar {
-        color: #f92aad;
-        background: #333;
+        color: #50fa7b;
+        background: #44475a;
     }
     #track-time {
-        color: #b14dff;
+        color: #bd93f9;
         text-align: right;
     }
     #resize-gate {
@@ -236,8 +236,8 @@ class MusicPlayerApp(App):
         height: 100%;
         content-align: center middle;
         text-style: bold;
-        color: #f7768e;
-        background: #0b0914;
+        color: #ff5555;
+        background: #282a36;
     }
     """
 
@@ -261,14 +261,14 @@ class MusicPlayerApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        yield Label("TUI MUSIC STREAMER", id="breadcrumb-bar")
+        yield Label("󰎆 NASA TUI", id="breadcrumb-bar")
         with Vertical(id="main-container"):
             with Container(id="queue-container"):
-                yield Label(" 🎵 UPCOMING QUEUE ", id="queue-header")
+                yield Label(" 󰎆 UPCOMING QUEUE ", id="queue-header")
                 yield ListView(id="queue-list")
             yield NowPlaying()
         yield Static("Terminal too small! Please resize your pane.\n(Minimum 60x15 required)", id="resize-gate")
-        yield Label(" [/] Search | [SPACE] Pause | [N] Next | [P] Prev | [Q] Quit ", id="status-bar", markup=False)
+        yield Label(" 󰍉 [/] Search | 󰐊 [SPACE] Pause | 󰒭 [N] Next | 󰒮 [P] Prev | 󰒝 [S] Shuffle | 󰈆 [Q] Quit ", id="status-bar", markup=False)
         yield Footer()
 
     def on_resize(self, event) -> None:
@@ -282,25 +282,47 @@ class MusicPlayerApp(App):
     def on_mount(self) -> None:
         self.query_one(NowPlaying).update_cassette()
         if os.path.exists("songs.json"):
-            try:
-                with open("songs.json", "r") as f:
-                    all_songs = json.load(f)
-                if all_songs:
-                    # Shuffle the entire library thoroughly
-                    random.shuffle(all_songs)
-                    
-                    queue_list = self.query_one("#queue-list", ListView)
-                    # Load the whole library into the queue
-                    for song in all_songs:
-                        track_item = TrackItem(song)
-                        self.queue.append(track_item)
-                        queue_list.append(track_item)
-                    
-                    if self.queue:
-                        self.play_track(0)
-            except Exception as e:
-                # Log or handle error if needed, but for TUI we'll stay quiet
-                pass
+            self.load_library()
+
+    @work(exclusive=True, thread=True)
+    def load_library(self) -> None:
+        try:
+            with open("songs.json", "r") as f:
+                all_songs = json.load(f)
+            if all_songs:
+                # Shuffle the entire library thoroughly
+                random.shuffle(all_songs)
+                
+                # Load first 50 immediately for fast startup
+                initial_songs = all_songs[:50]
+                remaining_songs = all_songs[50:]
+                
+                self.app.call_from_thread(self.add_batch_to_queue, initial_songs, start_playback=True)
+                
+                # Load remaining in background batches of 500 to keep UI responsive
+                for i in range(0, len(remaining_songs), 500):
+                    batch = remaining_songs[i:i+500]
+                    self.app.call_from_thread(self.add_batch_to_queue, batch, start_playback=False)
+        except Exception:
+            pass
+
+    def add_batch_to_queue(self, song_data_list, start_playback=False) -> None:
+        queue_list = self.query_one("#queue-list", ListView)
+        for data in song_data_list:
+            track_item = TrackItem(data)
+            self.queue.append(track_item)
+            queue_list.append(track_item)
+        
+        if start_playback and self.queue:
+            self.play_track(0)
+
+    def action_quit(self) -> None:
+        """Handle clean shutdown to avoid RuntimeWarnings."""
+        try:
+            self.player.player.terminate()
+        except Exception:
+            pass
+        self.exit()
 
     def action_shuffle(self):
         if not self.queue:
@@ -410,7 +432,8 @@ class MusicPlayerApp(App):
         self.query_one("#track-artist", Label).update(artist)
 
     def update_progress(self, time_pos):
-        if time_pos is None: return
+        if time_pos is None:
+            return
         duration = self.player.duration
         if duration:
             percent = (time_pos / duration) * 100
@@ -425,7 +448,8 @@ class MusicPlayerApp(App):
                 self.action_next_track()
 
     def format_time(self, seconds):
-        if seconds is None: return "00:00"
+        if seconds is None:
+            return "00:00"
         m, s = divmod(int(seconds), 60)
         return f"{m:02d}:{s:02d}"
 
