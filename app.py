@@ -286,14 +286,20 @@ class MusicPlayerApp(App):
                 with open("songs.json", "r") as f:
                     all_songs = json.load(f)
                 if all_songs:
-                    # Shuffle the entire library
+                    # Shuffle the entire library thoroughly
                     random.shuffle(all_songs)
-                    # Load a larger random selection (up to 200 songs)
-                    count = min(len(all_songs), 200)
-                    for i in range(count):
-                        self.add_to_queue(all_songs[i], play_now=False)
-                    self.play_track(0)
-            except Exception:
+                    
+                    queue_list = self.query_one("#queue-list", ListView)
+                    # Load the whole library into the queue
+                    for song in all_songs:
+                        track_item = TrackItem(song)
+                        self.queue.append(track_item)
+                        queue_list.append(track_item)
+                    
+                    if self.queue:
+                        self.play_track(0)
+            except Exception as e:
+                # Log or handle error if needed, but for TUI we'll stay quiet
                 pass
 
     def action_shuffle(self):
