@@ -104,11 +104,12 @@ class SearchScreen(ModalScreen):
             self.dismiss(event.item.result)
 
 class NowPlaying(Static):
+    # Precise 22-cell alignment (accounting for 2-cell Nerd Font icons)
     CASSETTE_FRAME = [
         " ╔══════════════════╗ ",
-        " ║  󰓠   NASA  TUI    ║ ",
+        " ║ 󰓠  NASA TUI      ║ ",
         " ╟──┬────────────┬──╢ ",
-        " ║  │ {left}      {right} │  ║ ",
+        " ║  │  {left}      {right}  │  ║ ",
         " ║  ╰────────────╯  ║ ",
         " ╚══════╗    ╔══════╝ ",
         "        ╚════╝        "
@@ -254,6 +255,7 @@ class MusicPlayerApp(App):
         super().__init__()
         self.queue = []
         self.current_index = -1
+        self._is_transitioning = False
         self.player = MPVManager(
             on_metadata_change=self.handle_metadata,
             on_tick=self.handle_tick
@@ -316,13 +318,12 @@ class MusicPlayerApp(App):
         if start_playback and self.queue:
             self.play_track(0)
 
-    def action_quit(self) -> None:
-        """Handle clean shutdown to avoid RuntimeWarnings."""
+    def on_unmount(self) -> None:
+        """Handle clean shutdown when the app is closed."""
         try:
             self.player.player.terminate()
         except Exception:
             pass
-        self.exit()
 
     def action_shuffle(self):
         if not self.queue:
@@ -394,9 +395,11 @@ class MusicPlayerApp(App):
             
             # If local file, check if it exists
             if isinstance(track_item.track_data, str) and not os.path.exists(track_item.track_data):
+                self._is_transitioning = False
                 self.action_next_track()
                 return
 
+            self._is_transitioning = False
             self.player.play(track_item.source)
             # Highlight in list
             queue_list = self.query_one("#queue-list", ListView)
@@ -412,7 +415,10 @@ class MusicPlayerApp(App):
         self.player.toggle_pause()
 
     def action_next_track(self):
+        if self._is_transitioning:
+            return
         if self.current_index + 1 < len(self.queue):
+            self._is_transitioning = True
             self.play_track(self.current_index + 1)
 
     def action_prev_track(self):
@@ -443,8 +449,8 @@ class MusicPlayerApp(App):
             is_playing = not self.player.player.pause
             now_playing.update_info(self.player.title, self.player.artist, percent, time_str, is_playing)
             
-            # Auto-next
-            if time_pos >= duration - 0.5:
+            # Auto-next with debounce check
+            if not self._is_transitioning and time_pos >= duration - 0.8:
                 self.action_next_track()
 
     def format_time(self, seconds):
