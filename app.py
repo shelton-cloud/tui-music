@@ -2,6 +2,7 @@ import json
 import math
 import os
 import random
+import time
 
 from textual import on, work
 from textual.app import App, ComposeResult
@@ -113,24 +114,23 @@ class SearchScreen(ModalScreen):
 
 class WaveVisualizer(Static):
     """A high-resolution wave visualizer using Braille characters."""
-    
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.is_playing = False
         self.phase = 0.0
-        self.history = [0.0] * 100 
+        self.history = [0.0] * 100
+        self._last_content = ""
 
     def on_mount(self) -> None:
-        self.set_interval(0.08, self.animate)
+        self.set_interval(0.08, self.update_wave)
 
-    def animate(self) -> None:
-        # Update history length based on width
+    def update_wave(self) -> None:
         target_len = (self.size.width or 25) * 2
         if len(self.history) < target_len:
             self.history = [0.0] * (target_len - len(self.history)) + self.history
         elif len(self.history) > target_len:
             self.history = self.history[-target_len:]
-            
+
         # Pull cached peak level from player (non-blocking)
         if self.is_playing:
             raw_peak = self.app.player.peak_level
@@ -140,60 +140,73 @@ class WaveVisualizer(Static):
         else:
             self.phase += 0.1
             new_val = 0.05 + 0.05 * math.sin(self.phase)
-            
         self.history = self.history[1:] + [new_val]
-        
+
         new_content = self.render_wave()
-        if not hasattr(self, "_last_content") or new_content != self._last_content:
+        if new_content != self._last_content:
             self.update(new_content)
             self._last_content = new_content
 
     def render_wave(self) -> str:
         width = self.size.width
         height = self.size.height
-        if width < 5 or height < 1: return ""
-        
+        if width < 5 or height < 1:
+            return ""
+
         # Pre-calculate dot status for all columns in history
         # This avoids re-calculating get_dots for every row
-        dot_matrix = [] # list of (d1, d2) for each braille char position
+        dot_matrix = []
         for c in range(0, min(width * 2, len(self.history)), 2):
-            if c + 1 >= len(self.history): break
-            h1, h2 = self.history[c], self.history[c+1]
-            dot_matrix.append((h1, h2))
+            if c + 1 >= len(self.history):
+                break
+            dot_matrix.append((self.history[c], self.history[c+1]))
 
         rows = []
         for r in range(height):
             row_chars = []
-            row_bottom_thresh = (height - r - 1) / height
-            row_top_thresh = (height - r) / height
-            
+            b_thresh = (height - r - 1) / height
+            t_thresh = (height - r) / height
             for h1, h2 in dot_matrix:
-                def get_dots_val(val, b_thresh, t_thresh):
-                    rel = (val - b_thresh) / (t_thresh - b_thresh)
-                    if rel <= 0: return (0,0,0,0)
-                    if rel >= 1: return (1,1,1,1)
-                    if rel > 0.75: return (1,1,1,1)
-                    if rel > 0.5: return (0,1,1,1)
-                    if rel > 0.25: return (0,0,1,1)
-                    return (0,0,0,1)
-
-                d1 = get_dots_val(h1, row_bottom_thresh, row_top_thresh)
-                d2 = get_dots_val(h2, row_bottom_thresh, row_top_thresh)
-                
-                code = 0
-                if d1[0]: code |= 0x01
-                if d1[1]: code |= 0x02
-                if d1[2]: code |= 0x04
-                if d1[3]: code |= 0x40
-                if d2[0]: code |= 0x08
-                if d2[1]: code |= 0x10
-                if d2[2]: code |= 0x20
-                if d2[3]: code |= 0x80
-                
+                code = self._get_braille_code(h1, h2, b_thresh, t_thresh)
                 row_chars.append(chr(0x2800 + code) if code else " ")
             rows.append("".join(row_chars))
-            
+
         return "\n".join(rows)
+
+    def _get_braille_code(self, h1, h2, b_thresh, t_thresh):
+        """Calculate Braille Unicode offset for two history points in a row."""
+        def get_dots(val):
+            rel = (val - b_thresh) / (t_thresh - b_thresh)
+            if rel <= 0:
+                return (0, 0, 0, 0)
+            if rel >= 1 or rel > 0.75:
+                return (1, 1, 1, 1)
+            if rel > 0.5:
+                return (0, 1, 1, 1)
+            if rel > 0.25:
+                return (0, 0, 1, 1)
+            return (0, 0, 0, 1)
+
+        d1 = get_dots(h1)
+        d2 = get_dots(h2)
+        code = 0
+        if d1[0]:
+            code |= 0x01
+        if d1[1]:
+            code |= 0x02
+        if d1[2]:
+            code |= 0x04
+        if d1[3]:
+            code |= 0x40
+        if d2[0]:
+            code |= 0x08
+        if d2[1]:
+            code |= 0x10
+        if d2[2]:
+            code |= 0x20
+        if d2[3]:
+            code |= 0x80
+        return code
 
 
 class NowPlaying(Static):
@@ -367,6 +380,7 @@ class MusicPlayerApp(App):
             on_tick=self.handle_tick
         )
         self._last_tick_time = 0
+        self.queue_data = []
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -405,7 +419,6 @@ class MusicPlayerApp(App):
 
                 # Load first 200 immediately for fast startup
                 initial_songs = all_songs[:200]
-                remaining_songs = all_songs[200:]
 
                 self.app.call_from_thread(self.add_batch_to_queue, initial_songs, start_playback=True)
 
@@ -549,7 +562,6 @@ class MusicPlayerApp(App):
         self.call_from_thread(self.update_now_playing_title)
 
     def handle_tick(self, time_pos):
-        import time
         now = time.time()
         # Only update progress every 0.25 seconds to save CPU
         if now - self._last_tick_time > 0.25:

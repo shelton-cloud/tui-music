@@ -4,16 +4,17 @@ import ctypes.util
 
 # Robust fix for macOS Homebrew libmpv location
 if sys.platform == 'darwin':
-    homebrew_lib = "/opt/homebrew/lib/libmpv.dylib"
-    if os.path.exists(homebrew_lib):
+    HOMEBREW_LIB = "/opt/homebrew/lib/libmpv.dylib"
+    if os.path.exists(HOMEBREW_LIB):
         # Monkey-patch find_library so 'import mpv' can find it
         _original_find_library = ctypes.util.find_library
         def _new_find_library(name):
             if name == 'mpv':
-                return homebrew_lib
+                return HOMEBREW_LIB
             return _original_find_library(name)
         ctypes.util.find_library = _new_find_library
 
+# pylint: disable=wrong-import-position
 import mpv
 
 class MPVManager:
@@ -33,49 +34,46 @@ class MPVManager:
         self.on_tick = on_tick
         self._peak_level = 0.0
 
+        @self.player.property_observer('time-pos')
+        def time_observer(_name, value):
+            if self.on_tick:
+                self.on_tick(value)
+
         # Observe audio filter metadata (real-time)
         @self.player.property_observer('af-metadata')
         def metadata_observer(_name, value):
-            if value:
-                # Filter metadata is often in a list or dict depending on mpv version
-                # We look for astats data
-                peak_keys = [
-                    'lavfi.astats.Overall.Peak_level',
-                    'lavfi.astats.1.Overall.Peak_level'
-                ]
-                
-                # value is typically a dict where keys are filter names or just the metadata
-                # Let's check both levels
-                target_data = value
-                if isinstance(value, dict) and 'astats' in value:
-                    target_data = value['astats']
-                
-                if isinstance(target_data, dict):
-                    for key in peak_keys:
-                        # Sometimes the prefix is stripped in af-metadata
-                        short_key = key.replace('lavfi.astats.', '')
-                        for k in [key, short_key]:
-                            if k in target_data:
-                                try:
-                                    val = float(target_data[k])
-                                    if val < 0: # dB
-                                        self._peak_level = 10**(val/20)
-                                    else: # Ratio
-                                        self._peak_level = val
-                                    return
-                                except:
-                                    pass
-        
+            if not isinstance(value, dict):
+                return
+
+            # Look for astats data
+            target_data = value.get('astats', value)
+            if not isinstance(target_data, dict):
+                return
+
+            peak_keys = ['lavfi.astats.Overall.Peak_level', 'lavfi.astats.1.Overall.Peak_level']
+            for key in peak_keys:
+                # Check both full key and stripped key
+                for k in [key, key.replace('lavfi.astats.', '')]:
+                    if k in target_data:
+                        self._update_peak(target_data[k])
+                        return
+
         # Also keep track of tag changes
         @self.player.property_observer('metadata')
         def tags_observer(_name, value):
             if self.on_metadata_change:
                 self.on_metadata_change(value)
 
-        @self.player.property_observer('time-pos')
-        def time_observer(_name, value):
-            if self.on_tick:
-                self.on_tick(value)
+    def _update_peak(self, raw_val):
+        """Update internal peak level from raw value (dB or ratio)."""
+        try:
+            val = float(raw_val)
+            if val < 0: # dB
+                self._peak_level = 10**(val/20)
+            else: # Ratio
+                self._peak_level = val
+        except (ValueError, TypeError):
+            pass
 
     def play(self, source):
         # source can be a local file path or a URL
