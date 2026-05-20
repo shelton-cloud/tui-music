@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import random
 
@@ -110,6 +111,91 @@ class SearchScreen(ModalScreen):
             self.dismiss(event.item.result)
 
 
+class WaveVisualizer(Static):
+    """A high-resolution wave visualizer using Braille characters."""
+    
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.is_playing = False
+        self.phase = 0.0
+        self.history = [0.0] * 100 
+
+    def on_mount(self) -> None:
+        self.set_interval(0.08, self.animate)
+
+    def animate(self) -> None:
+        # Update history length based on width
+        target_len = (self.size.width or 25) * 2
+        if len(self.history) < target_len:
+            self.history = [0.0] * (target_len - len(self.history)) + self.history
+        elif len(self.history) > target_len:
+            self.history = self.history[-target_len:]
+            
+        # Pull cached peak level from player (non-blocking)
+        if self.is_playing:
+            raw_peak = self.app.player.peak_level
+            # Increase sensitivity and use a more dynamic scaling
+            new_val = min(1.0, (raw_peak ** 0.3) * 1.8) if raw_peak > 0 else 0.0
+            new_val = max(0.05, new_val + random.uniform(-0.02, 0.02))
+        else:
+            self.phase += 0.1
+            new_val = 0.05 + 0.05 * math.sin(self.phase)
+            
+        self.history = self.history[1:] + [new_val]
+        
+        new_content = self.render_wave()
+        if not hasattr(self, "_last_content") or new_content != self._last_content:
+            self.update(new_content)
+            self._last_content = new_content
+
+    def render_wave(self) -> str:
+        width = self.size.width
+        height = self.size.height
+        if width < 5 or height < 1: return ""
+        
+        # Pre-calculate dot status for all columns in history
+        # This avoids re-calculating get_dots for every row
+        dot_matrix = [] # list of (d1, d2) for each braille char position
+        for c in range(0, min(width * 2, len(self.history)), 2):
+            if c + 1 >= len(self.history): break
+            h1, h2 = self.history[c], self.history[c+1]
+            dot_matrix.append((h1, h2))
+
+        rows = []
+        for r in range(height):
+            row_chars = []
+            row_bottom_thresh = (height - r - 1) / height
+            row_top_thresh = (height - r) / height
+            
+            for h1, h2 in dot_matrix:
+                def get_dots_val(val, b_thresh, t_thresh):
+                    rel = (val - b_thresh) / (t_thresh - b_thresh)
+                    if rel <= 0: return (0,0,0,0)
+                    if rel >= 1: return (1,1,1,1)
+                    if rel > 0.75: return (1,1,1,1)
+                    if rel > 0.5: return (0,1,1,1)
+                    if rel > 0.25: return (0,0,1,1)
+                    return (0,0,0,1)
+
+                d1 = get_dots_val(h1, row_bottom_thresh, row_top_thresh)
+                d2 = get_dots_val(h2, row_bottom_thresh, row_top_thresh)
+                
+                code = 0
+                if d1[0]: code |= 0x01
+                if d1[1]: code |= 0x02
+                if d1[2]: code |= 0x04
+                if d1[3]: code |= 0x40
+                if d2[0]: code |= 0x08
+                if d2[1]: code |= 0x10
+                if d2[2]: code |= 0x20
+                if d2[3]: code |= 0x80
+                
+                row_chars.append(chr(0x2800 + code) if code else " ")
+            rows.append("".join(row_chars))
+            
+        return "\n".join(rows)
+
+
 class NowPlaying(Static):
     # Precise 22-cell alignment (accounting for 2-cell Nerd Font icons)
     CASSETTE_FRAME = [
@@ -154,7 +240,9 @@ class NowPlaying(Static):
 
     def compose(self) -> ComposeResult:
         with Horizontal():
-            yield Static("", id="cassette-art")
+            with Vertical(id="cassette-container"):
+                yield Static("", id="cassette-art")
+                yield WaveVisualizer(id="visualizer")
             with Vertical(id="track-info-container"):
                 yield Label(self.track_title, id="track-title")
                 yield Label(self.track_artist, id="track-artist")
@@ -169,6 +257,7 @@ class NowPlaying(Static):
         self.query_one("#track-artist", Label).update(artist)
         self.query_one("#track-progress", ProgressBar).progress = progress
         self.query_one("#track-time", Label).update(time_str)
+        self.query_one(WaveVisualizer).is_playing = is_playing
         if not self.is_playing:
             self.update_cassette()
 
@@ -240,6 +329,15 @@ class MusicPlayerApp(App):
         color: #bd93f9;
         text-align: right;
     }
+    #visualizer {
+        height: 1fr;
+        margin-top: 1;
+        color: #50fa7b;
+    }
+    #cassette-container {
+        width: 25;
+        height: 100%;
+    }
     #resize-gate {
         display: none;
         height: 100%;
@@ -268,6 +366,7 @@ class MusicPlayerApp(App):
             on_metadata_change=self.handle_metadata,
             on_tick=self.handle_tick
         )
+        self._last_tick_time = 0
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -304,25 +403,29 @@ class MusicPlayerApp(App):
                 # Shuffle the entire library thoroughly
                 random.shuffle(all_songs)
 
-                # Load first 50 immediately for fast startup
-                initial_songs = all_songs[:50]
-                remaining_songs = all_songs[50:]
+                # Load first 200 immediately for fast startup
+                initial_songs = all_songs[:200]
+                remaining_songs = all_songs[200:]
 
                 self.app.call_from_thread(self.add_batch_to_queue, initial_songs, start_playback=True)
 
-                # Load remaining in background batches of 500 to keep UI responsive
-                for i in range(0, len(remaining_songs), 500):
-                    batch = remaining_songs[i:i+500]
-                    self.app.call_from_thread(self.add_batch_to_queue, batch, start_playback=False)
+                # Keep the rest in memory but DON'T add widgets for all 10k+ songs
+                # This prevents the UI from "chugging"
+                self.queue_data = all_songs # Store raw data for searching/shuffling
         except Exception:  # pylint: disable=broad-exception-caught
             pass
 
     def add_batch_to_queue(self, song_data_list, start_playback=False) -> None:
         queue_list = self.query_one("#queue-list", ListView)
         for data in song_data_list:
-            track_item = TrackItem(data)
-            self.queue.append(track_item)
-            queue_list.append(track_item)
+            # Only add to UI if we are under the cap
+            if len(self.queue) < 300:
+                track_item = TrackItem(data)
+                self.queue.append(track_item)
+                queue_list.append(track_item)
+            else:
+                # Still add to internal queue if needed, but maybe we just stick to 300
+                break
 
         if start_playback and self.queue:
             self.play_track(0)
@@ -411,6 +514,9 @@ class MusicPlayerApp(App):
 
             self._is_transitioning = False
             self.player.play(track_item.source)
+            # Update UI state immediately
+            self.query_one(NowPlaying).is_playing = True
+            self.query_one(WaveVisualizer).is_playing = True
             # Highlight in list
             queue_list = self.query_one("#queue-list", ListView)
             queue_list.index = index
@@ -423,6 +529,10 @@ class MusicPlayerApp(App):
 
     def action_toggle_pause(self):
         self.player.toggle_pause()
+        # Sync UI state
+        is_playing = not self.player.player.pause
+        self.query_one(NowPlaying).is_playing = is_playing
+        self.query_one(WaveVisualizer).is_playing = is_playing
 
     def action_next_track(self):
         if self._is_transitioning:
@@ -439,7 +549,12 @@ class MusicPlayerApp(App):
         self.call_from_thread(self.update_now_playing_title)
 
     def handle_tick(self, time_pos):
-        self.call_from_thread(self.update_progress, time_pos)
+        import time
+        now = time.time()
+        # Only update progress every 0.25 seconds to save CPU
+        if now - self._last_tick_time > 0.25:
+            self._last_tick_time = now
+            self.call_from_thread(self.update_progress, time_pos)
 
     def update_now_playing_title(self):
         title = self.player.title

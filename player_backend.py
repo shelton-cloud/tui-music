@@ -1,4 +1,19 @@
 import os
+import sys
+import ctypes.util
+
+# Robust fix for macOS Homebrew libmpv location
+if sys.platform == 'darwin':
+    homebrew_lib = "/opt/homebrew/lib/libmpv.dylib"
+    if os.path.exists(homebrew_lib):
+        # Monkey-patch find_library so 'import mpv' can find it
+        _original_find_library = ctypes.util.find_library
+        def _new_find_library(name):
+            if name == 'mpv':
+                return homebrew_lib
+            return _original_find_library(name)
+        ctypes.util.find_library = _new_find_library
+
 import mpv
 
 class MPVManager:
@@ -7,6 +22,8 @@ class MPVManager:
         try:
             # Let MPV autodetect the audio output (ao) for better compatibility
             self.player = mpv.MPV(ytdl=True, video=False, terminal=False)
+            # Add audio filter to track stats (volume peaks)
+            self.player.af = 'lavfi=[astats=metadata=1:reset=1]'
             print(f"DEBUG: MPV Initialized. Driver: {self.player.ao}")
         except Exception as e:
             print(f"DEBUG: MPV Initialization failed: {e}")
@@ -14,10 +31,44 @@ class MPVManager:
 
         self.on_metadata_change = on_metadata_change
         self.on_tick = on_tick
+        self._peak_level = 0.0
 
-        # Observe properties
-        @self.player.property_observer('metadata')
+        # Observe audio filter metadata (real-time)
+        @self.player.property_observer('af-metadata')
         def metadata_observer(_name, value):
+            if value:
+                # Filter metadata is often in a list or dict depending on mpv version
+                # We look for astats data
+                peak_keys = [
+                    'lavfi.astats.Overall.Peak_level',
+                    'lavfi.astats.1.Overall.Peak_level'
+                ]
+                
+                # value is typically a dict where keys are filter names or just the metadata
+                # Let's check both levels
+                target_data = value
+                if isinstance(value, dict) and 'astats' in value:
+                    target_data = value['astats']
+                
+                if isinstance(target_data, dict):
+                    for key in peak_keys:
+                        # Sometimes the prefix is stripped in af-metadata
+                        short_key = key.replace('lavfi.astats.', '')
+                        for k in [key, short_key]:
+                            if k in target_data:
+                                try:
+                                    val = float(target_data[k])
+                                    if val < 0: # dB
+                                        self._peak_level = 10**(val/20)
+                                    else: # Ratio
+                                        self._peak_level = val
+                                    return
+                                except:
+                                    pass
+        
+        # Also keep track of tag changes
+        @self.player.property_observer('metadata')
+        def tags_observer(_name, value):
             if self.on_metadata_change:
                 self.on_metadata_change(value)
 
@@ -63,3 +114,8 @@ class MPVManager:
             if 'album_artist' in metadata:
                 return metadata['album_artist']
         return "Unknown Artist"
+
+    @property
+    def peak_level(self):
+        """Returns the current cached peak level (0.0 to 1.0)."""
+        return self._peak_level
