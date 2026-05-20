@@ -1,14 +1,18 @@
-from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical, Container
-from textual.widgets import Header, Footer, DirectoryTree, ListView, ListItem, Label, ProgressBar, Static, Input
-from textual.screen import ModalScreen
-from textual.binding import Binding
-from textual import work, on
-import os
 import json
+import os
 import random
-from player_backend import MPVManager
+
+from textual import on, work
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Container, Horizontal, Vertical
+from textual.screen import ModalScreen
+from textual.widgets import (DirectoryTree, Footer, Header, Input, Label,
+                             ListItem, ListView, ProgressBar, Static)
 from ytmusicapi import YTMusic
+
+from player_backend import MPVManager
+
 
 class TrackItem(ListItem):
     def __init__(self, track_data):
@@ -37,6 +41,7 @@ class TrackItem(ListItem):
     def compose(self) -> ComposeResult:
         yield Label(f"{self.title} - {self.artist}")
 
+
 class ResultItem(ListItem):
     def __init__(self, result):
         super().__init__()
@@ -47,6 +52,7 @@ class ResultItem(ListItem):
 
     def compose(self) -> ComposeResult:
         yield Label(f"[{self.duration}] {self.title} - {self.artist}")
+
 
 class SearchScreen(ModalScreen):
     CSS = """
@@ -103,6 +109,7 @@ class SearchScreen(ModalScreen):
         if isinstance(event.item, ResultItem):
             self.dismiss(event.item.result)
 
+
 class NowPlaying(Static):
     # Precise 22-cell alignment (accounting for 2-cell Nerd Font icons)
     CASSETTE_FRAME = [
@@ -114,10 +121,10 @@ class NowPlaying(Static):
         " ╚══════╗    ╔══════╝ ",
         "        ╚════╝        "
     ]
-    
+
     # Reel animation frames (Braille/Block transitions)
     REEL_FRAMES = ["◐", "◓", "◑", "◒"]
-    
+
     def __init__(self):
         super().__init__()
         self.track_title = "No Track Playing"
@@ -138,9 +145,9 @@ class NowPlaying(Static):
         # Mirror the reels for symmetry
         left_reel = f"[bold #ff79c6]{reel}[/]"
         right_reel = f"[bold #ff79c6]{reel}[/]"
-        
+
         cassette_art = "\n".join(self.CASSETTE_FRAME).format(
-            left=left_reel, 
+            left=left_reel,
             right=right_reel
         )
         self.query_one("#cassette-art", Static).update(cassette_art)
@@ -164,6 +171,7 @@ class NowPlaying(Static):
         self.query_one("#track-time", Label).update(time_str)
         if not self.is_playing:
             self.update_cassette()
+
 
 class MusicPlayerApp(App):
     CSS = """
@@ -269,8 +277,9 @@ class MusicPlayerApp(App):
                 yield Label(" 󰎆 UPCOMING QUEUE ", id="queue-header")
                 yield ListView(id="queue-list")
             yield NowPlaying()
-        yield Static("Terminal too small! Please resize your pane.\n(Minimum 60x15 required)", id="resize-gate")
-        yield Label(" 󰍉 [/] Search | 󰐊 [SPACE] Pause | 󰒭 [N] Next | 󰒮 [P] Prev | 󰒝 [S] Shuffle | 󰈆 [Q] Quit ", id="status-bar", markup=False)
+        yield Static("Terminal too small! Please resize your pane.\n(Min 60x15 required)", id="resize-gate")
+        status_text = " 󰍉 [/] Search | 󰐊 [SPACE] Pause | 󰒭 [N] Next | 󰒮 [P] Prev | 󰒝 [S] Shuffle | 󰈆 [Q] Quit "
+        yield Label(status_text, id="status-bar", markup=False)
         yield Footer()
 
     def on_resize(self, event) -> None:
@@ -289,23 +298,23 @@ class MusicPlayerApp(App):
     @work(exclusive=True, thread=True)
     def load_library(self) -> None:
         try:
-            with open("songs.json", "r") as f:
+            with open("songs.json", "r", encoding="utf-8") as f:
                 all_songs = json.load(f)
             if all_songs:
                 # Shuffle the entire library thoroughly
                 random.shuffle(all_songs)
-                
+
                 # Load first 50 immediately for fast startup
                 initial_songs = all_songs[:50]
                 remaining_songs = all_songs[50:]
-                
+
                 self.app.call_from_thread(self.add_batch_to_queue, initial_songs, start_playback=True)
-                
+
                 # Load remaining in background batches of 500 to keep UI responsive
                 for i in range(0, len(remaining_songs), 500):
                     batch = remaining_songs[i:i+500]
                     self.app.call_from_thread(self.add_batch_to_queue, batch, start_playback=False)
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             pass
 
     def add_batch_to_queue(self, song_data_list, start_playback=False) -> None:
@@ -314,7 +323,7 @@ class MusicPlayerApp(App):
             track_item = TrackItem(data)
             self.queue.append(track_item)
             queue_list.append(track_item)
-        
+
         if start_playback and self.queue:
             self.play_track(0)
 
@@ -322,28 +331,28 @@ class MusicPlayerApp(App):
         """Handle clean shutdown when the app is closed."""
         try:
             self.player.player.terminate()
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             pass
 
     def action_shuffle(self):
         if not self.queue:
             return
-        
+
         # Save reference to current track data
         current_data = self.queue[self.current_index].track_data if self.current_index != -1 else None
-        
+
         # Get all track data from current queue
         queue_data = [item.track_data for item in self.queue]
         random.shuffle(queue_data)
-        
+
         # Clear UI and internal list
         self.query_one("#queue-list", ListView).clear()
         self.queue = []
-        
+
         # Rebuild queue with shuffled data
         for data in queue_data:
             self.add_to_queue(data, play_now=False)
-            
+
         # Try to find where the previously playing track moved to
         if current_data:
             for i, item in enumerate(self.queue):
@@ -354,7 +363,7 @@ class MusicPlayerApp(App):
                         is_match = current_data["path"] == item.track_data["path"]
                     elif "videoId" in current_data and "videoId" in item.track_data:
                         is_match = current_data["videoId"] == item.track_data["videoId"]
-                
+
                 if is_match:
                     self.current_index = i
                     self.query_one("#queue-list", ListView).index = i
@@ -374,7 +383,8 @@ class MusicPlayerApp(App):
         if file_path.lower().endswith(('.mp3', '.flac', '.wav', '.m4a', '.ogg')):
             self.add_to_queue(file_path)
         # Update breadcrumb
-        self.query_one("#breadcrumb-bar", Label).update(f"NAS > {os.path.dirname(file_path).split('/')[-1].upper()} > {os.path.basename(file_path)}")
+        dir_name = os.path.dirname(file_path).split('/')[-1].upper()
+        self.query_one("#breadcrumb-bar", Label).update(f"NAS > {dir_name} > {os.path.basename(file_path)}")
 
     @on(ListView.Selected, "#queue-list")
     def on_queue_selected(self, event: ListView.Selected):
@@ -392,7 +402,7 @@ class MusicPlayerApp(App):
         if 0 <= index < len(self.queue):
             self.current_index = index
             track_item = self.queue[index]
-            
+
             # If local file, check if it exists
             if isinstance(track_item.track_data, str) and not os.path.exists(track_item.track_data):
                 self._is_transitioning = False
@@ -404,7 +414,7 @@ class MusicPlayerApp(App):
             # Highlight in list
             queue_list = self.query_one("#queue-list", ListView)
             queue_list.index = index
-            
+
             # Update breadcrumb
             if isinstance(track_item.track_data, str):
                 self.query_one("#breadcrumb-bar", Label).update(f"NAS > {os.path.basename(track_item.source)}")
@@ -425,7 +435,7 @@ class MusicPlayerApp(App):
         if self.current_index - 1 >= 0:
             self.play_track(self.current_index - 1)
 
-    def handle_metadata(self, metadata):
+    def handle_metadata(self, _metadata):
         self.call_from_thread(self.update_now_playing_title)
 
     def handle_tick(self, time_pos):
@@ -448,7 +458,7 @@ class MusicPlayerApp(App):
             # Use player.player.pause to determine if playing (mpv property)
             is_playing = not self.player.player.pause
             now_playing.update_info(self.player.title, self.player.artist, percent, time_str, is_playing)
-            
+
             # Auto-next with debounce check
             if not self._is_transitioning and time_pos >= duration - 0.8:
                 self.action_next_track()
@@ -458,6 +468,7 @@ class MusicPlayerApp(App):
             return "00:00"
         m, s = divmod(int(seconds), 60)
         return f"{m:02d}:{s:02d}"
+
 
 if __name__ == "__main__":
     app = MusicPlayerApp()

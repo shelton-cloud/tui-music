@@ -1,5 +1,5 @@
-import mpv
 import os
+import mpv
 
 class MPVManager:
     def __init__(self, on_metadata_change=None, on_tick=None):
@@ -14,13 +14,13 @@ class MPVManager:
 
         self.on_metadata_change = on_metadata_change
         self.on_tick = on_tick
-        
+
         # Observe properties
         @self.player.property_observer('metadata')
         def metadata_observer(_name, value):
             if self.on_metadata_change:
                 self.on_metadata_change(value)
-                
+
         @self.player.property_observer('time-pos')
         def time_observer(_name, value):
             if self.on_tick:
@@ -50,7 +50,7 @@ class MPVManager:
         if metadata:
             if 'title' in metadata:
                 return metadata['title']
-            if 'icy-title' in metadata: # For streams/some files
+            if 'icy-title' in metadata:  # For streams/some files
                 return metadata['icy-title']
         return os.path.basename(self.player.path) if self.player.path else "No Track Playing"
 
