@@ -13,9 +13,16 @@ jobs:
       image: python:3.11-bookworm
     steps:
       - name: Clone repository
+        env:
+          GIT_USERNAME: ${{ secrets.GIT_USERNAME }}
+          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
         run: |
           which git || (apt-get update -qq && apt-get install -y -qq git)
-          git clone http://${{ secrets.GIT_USERNAME }}:${{ secrets.GIT_TOKEN }}@forgejo.lan/shelton/tui-music.git .
+          umask 077
+          NETRC="$HOME/.netrc"
+          trap 'rm -f "$NETRC"' EXIT
+          printf 'machine forgejo.sheltsville.com login %s password %s\n' "$GIT_USERNAME" "$GIT_TOKEN" > "$NETRC"
+          git clone https://forgejo.sheltsville.com/shelton/tui-music.git .
           git checkout ${{ github.sha }}
 
       - name: Install system dependencies
