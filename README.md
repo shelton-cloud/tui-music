@@ -29,3 +29,19 @@ A retro-styled terminal music player that connects to your NAS and streams from 
 ## Configuration
 - Update `scanner.py` with your NAS mount path and run it to index local files into `songs.json`.
 - The player defaults to `./` if the NAS is not found.
+
+## Go Version
+A zero-cgo static Go port (`tuimusic`) is also included alongside the Python reference implementation. It shares the same `songs.json` index, keybindings (`SPACE`, `N`, `P`, `S`, `/`, `Q`), and external runtime tools (`mpv` and `yt-dlp`).
+
+```bash
+# Build static binary
+CGO_ENABLED=0 go build -o tuimusic ./cmd/tuimusic
+
+# Scan local library into songs.json
+./tuimusic scan --root /Volumes/music
+
+# Run the player
+./tuimusic
+```
+
+See [PORT_NOTES.md](PORT_NOTES.md) for architecture details and parity notes.

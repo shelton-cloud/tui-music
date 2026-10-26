@@ -39,3 +39,49 @@ jobs:
       - name: Analysing the code with pylint
         run: |
           pylint $(git ls-files '*.py') --rcfile=.pylintrc
+
+  go:
+    # Separate job so the Python lint above keeps its own toolchain and image.
+    # The Go port must stay cgo-free and build as a single static binary — that is
+    # the entire reason it exists, so the check is part of CI rather than a README
+    # promise.
+    runs-on: ubuntu-latest
+    container:
+      image: golang:1.27-bookworm
+    steps:
+      - name: Clone repository
+        env:
+          GIT_USERNAME: ${{ secrets.GIT_USERNAME }}
+          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+        run: |
+          which git || (apt-get update -qq && apt-get install -y -qq git)
+          umask 077
+          NETRC="$HOME/.netrc"
+          trap 'rm -f "$NETRC"' EXIT
+          printf 'machine forgejo.sheltsville.com login %s password %s\n' "$GIT_USERNAME" "$GIT_TOKEN" > "$NETRC"
+          git clone https://forgejo.sheltsville.com/shelton/tui-music.git .
+          git checkout ${{ github.sha }}
+
+      - name: Go toolchain
+        run: |
+          go version
+          go env GOVERSION
+
+      - name: Build, vet, test
+        run: |
+          go build ./...
+          go vet ./...
+          go test ./...
+
+      - name: Verify static binary (no cgo)
+        run: |
+          CGO_ENABLED=0 go build -o /tmp/tuimusic ./cmd/tuimusic
+          /tmp/tuimusic --help
+          # A dynamically linked binary would mean cgo crept in, defeating the port.
+          if command -v ldd >/dev/null 2>&1 && ldd /tmp/tuimusic 2>&1 | grep -qi "libc\|libmpv"; then
+            echo "ERROR: binary is dynamically linked — cgo dependency detected"
+            ldd /tmp/tuimusic
+            exit 1
+          fi
+          echo "static binary OK ($(du -h /tmp/tuimusic | cut -f1))"
+
