@@ -218,3 +218,27 @@ func TestQueueOperationsAndShuffle(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveSongPathCrossOS(t *testing.T) {
+	linuxRoot := "/run/user/1000/gvfs/smb-share:server=nasa.local,share=music"
+	macPath := "/Volumes/music/2Pac/All Eyez On Me/California Love.mp3"
+
+	got := ResolveSongPath(macPath, linuxRoot)
+	want := filepath.Join(linuxRoot, "2Pac", "All Eyez On Me", "California Love.mp3")
+	if got != want {
+		t.Fatalf("ResolveSongPath(%q, %q) = %q, want %q", macPath, linuxRoot, got, want)
+	}
+
+	// Also verify mapping back from a Linux GVFS path to macOS /Volumes/music
+	gotMac := ResolveSongPath(want, "/Volumes/music")
+	if gotMac != macPath {
+		t.Fatalf("ResolveSongPath(%q, /Volumes/music) = %q, want %q", want, gotMac, macPath)
+	}
+
+	// Verify TUI_MUSIC_ROOT override in DetectMusicRoot
+	tmpDir := t.TempDir()
+	t.Setenv("TUI_MUSIC_ROOT", tmpDir)
+	if detected := DetectMusicRoot(); detected != tmpDir {
+		t.Fatalf("DetectMusicRoot() = %q, want %q", detected, tmpDir)
+	}
+}

@@ -1,55 +1,48 @@
-# TUI Music Player: Project Context
+# TUI Music Player (`tuimusic`): Project Context
 
 ## Overview
-`tui-music` is a retro-styled, terminal-based music player built with Python and the [Textual](https://textual.textualize.io/) framework. It integrates local file playback (optimized for NAS mounts) with YouTube Music streaming capabilities.
+`tui-music` (`tuimusic`) is a retro-styled, terminal-based music player built in **Go** using the [Bubble Tea](https://github.com/charmbracelet/bubbletea) and [Lip Gloss](https://github.com/charmbracelet/lipgloss) frameworks. It integrates local NAS file playback (`nasa.local/music` across Linux and macOS) with YouTube Music streaming capabilities.
+
+*(Note: The legacy Python/Textual prototype has been deprecated and moved to `deprecated/`.)*
 
 ## Architecture
-- **TUI Layer (`app.py`):** Handles the user interface, including the queue, search modals, and a dynamic **animated cassette tape** widget.
-- **Playback Engine (`player_backend.py`):** A wrapper around `python-mpv`. It uses **automatic audio driver detection** for cross-platform compatibility and handles metadata/progress observation.
-- **Data Ingestion (`scanner.py`):** Scans a root directory (e.g., a NAS mount) and extracts rich metadata (**Artist, Title, Album**) using the `mutagen` library, persisting results to `songs.json`.
-- **Streaming:** Leverages `ytmusicapi` for searching and `yt-dlp` (via mpv's ytdl integration) for high-quality audio streaming.
-
-## Tech Stack
-- **Framework:** Textual (TUI)
-- **Audio Engine:** MPV (via `python-mpv`)
-- **Metadata/Search:** `ytmusicapi` & `mutagen` (local tags)
-- **Streaming:** `yt-dlp`
-- **Styling:** `rich` (integrated into Textual)
+- **Entrypoint (`cmd/tuimusic/main.go`):** CLI flag parsing (`--songs`, `--root`, `scan` subcommand), startup binary verification (`mpv` and `yt-dlp`), and signal-safe lifecycle management.
+- **TUI Layer (`internal/ui/ui.go`):** Bubble Tea state machine rendering the side-by-side Library Tree (`Artist → Album → Track`) and Upcoming Queue, YouTube Music search modal, dynamic **animated cassette tape** widget, and Braille wave visualizer.
+- **Playback Engine (`internal/player/player.go`):** Spawns headless `mpv` as a child process and communicates over a Unix domain socket using mpv's JSON IPC protocol.
+- **Library & Scanner (`internal/library/library.go`):** Pure-Go audio metadata parser (`github.com/dhowden/tag`), `songs.json` persistence, and automatic cross-OS NAS mount detection (`DetectMusicRoot` / `ResolveSongs`) so macOS (`/Volumes/music`) and Linux (`nasa.local/music` via GVFS, `/mnt`, `/media`, or `$TUI_MUSIC_ROOT`) share the same `songs.json` seamlessly.
+- **Streaming (`internal/youtube/youtube.go`):** Queries YouTube via `yt-dlp` and streams selected tracks through `mpv`.
 
 ## Prerequisites
-1. **Python 3.10+**
-2. **System mpv:** 
-   - macOS: `brew install mpv`
+1. **Go 1.22+** (for building)
+2. **System mpv:**
    - Linux: `sudo apt install mpv`
-3. **yt-dlp:** Required for streaming playback.
-4. **Mutagen:** Required for local metadata parsing (installed via `pip`).
+   - macOS: `brew install mpv`
+3. **yt-dlp:** Required for searching and streaming YouTube audio.
 
 ## Development Commands
-- **Install Dependencies:**
+- **Build Static Binary:**
   ```bash
-  python -m venv venv
-  source venv/bin/activate
-  pip install -r requirements.txt
-  pip install mutagen  # Ensure mutagen is present
+  CGO_ENABLED=0 go build -o tuimusic ./cmd/tuimusic
   ```
-- **Scan Local Library:**
+- **Run Unit Tests:**
   ```bash
-  python scanner.py [limit]
+  go test ./...
   ```
-  *Note: You can pass an optional numeric limit to the scanner. Edit `scanner.py` to point to your NAS mount path.*
+- **Scan Local/NAS Library:**
+  ```bash
+  ./tuimusic scan [--root /path/to/music] [--limit N]
+  ```
 - **Run the Application:**
   ```bash
-  python app.py
+  ./tuimusic
   ```
 
 ## UI & Controls
-- **SPACE:** Toggle Play/Pause. (Animation stops on pause).
+- **SPACE:** Toggle Play/Pause (animation stops on pause).
 - **N / P:** Next/Previous track in queue.
 - **S:** Shuffle the current queue.
-- ** / (Slash):** Open YouTube Music search modal.
+- **TAB:** Switch focus between Library Tree and Upcoming Queue panes.
+- **ENTER:** Expand/collapse tree node or play selected track.
+- **/ (Slash):** Open YouTube Music search modal.
 - **Q:** Quit application.
 
-## Conventions
-- **Queue Shuffling:** The application automatically shuffles the entire library and loads a random selection of 200 tracks on startup.
-- **Metadata Priority:** Local files use internal tags (ID3/FLAC/etc.) first, falling back to the filename if tags are missing.
-- **Visuals:** Double-line box drawing and animated reels (Braille/Block characters) define the "Cassette" aesthetic.

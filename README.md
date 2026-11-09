@@ -1,47 +1,57 @@
-# TUI Music Player 🎵
+# TUI Music Player (`tuimusic`) 🎵
 
-A retro-styled terminal music player that connects to your NAS and streams from YouTube Music.
+A retro-styled CRT terminal music player built in Go (Bubble Tea + Lip Gloss) that connects to your NAS (`nasa.local/music`) and streams from YouTube Music via `mpv` and `yt-dlp`.
+
+> **Note:** The original Python implementation (`app.py`, `scanner.py`, `player_backend.py`) has been deprecated and archived under `deprecated/` in favor of the single static Go binary (`tuimusic`).
 
 ## Features
-- **NAS Integration**: Browse your local music library via a directory tree.
-- **YouTube Music Streaming**: Search and queue songs directly from YouTube Music.
-- **Retro UI**: CRT-inspired colors and a cassette tape animation.
-- **MPV Powered**: High-quality playback with support for various audio formats and streaming.
+- **Zero-CGO Static Binary**: Compiles to a single self-contained executable (`tuimusic`).
+- **Cross-OS NAS Integration**: Browse your local music library (`Artist → Album → Track`) with automatic path resolution across Linux (`smb://nasa.local/music` via GVFS, `/mnt`, `/media`) and macOS (`/Volumes/music`).
+- **YouTube Music Streaming**: Search and queue songs directly from YouTube Music via `yt-dlp`.
+- **Retro CRT UI**: Dracula/Phosphor CRT colors, an animated cassette deck (`NASA TUI`), and a Braille wave visualizer.
+- **MPV JSON IPC**: High-quality playback powered by an isolated `mpv` background process over a Unix socket.
 
 ## Prerequisites
-- **Python 3.10+**
-- **mpv**: Required for audio playback. Install via `brew install mpv` (macOS) or `sudo apt install mpv` (Linux).
-- **yt-dlp**: Required for streaming.
+- **Go 1.22+** (to build from source)
+- **mpv**: Required for audio playback (`sudo apt install mpv` on Linux or `brew install mpv` on macOS).
+- **yt-dlp**: Required for YouTube Music search and streaming (`sudo apt install yt-dlp` or `brew install yt-dlp`).
 
-## Installation
-1. Clone the repository.
-2. Create a virtual environment: `python -m venv venv`.
-3. Install dependencies: `./venv/bin/pip install -r requirements.txt`.
-4. Run the app: `./venv/bin/python app.py`.
+## Building & Running
+
+```bash
+# Build the static Go binary
+CGO_ENABLED=0 go build -o tuimusic ./cmd/tuimusic
+
+# Run the player (auto-detects your Linux/macOS NAS mount path)
+./tuimusic
+
+# Or explicitly pass your NAS mount root if mounted in a custom location:
+./tuimusic --root /path/to/nasa.local/music
+```
+
+## Indexing Your NAS Library (`scan`)
+
+`tuimusic` automatically translates `/Volumes/music/...` paths in `songs.json` to your active Linux NAS mount at runtime, so you can share the same `songs.json` between macOS and Linux without re-scanning.
+
+When you add new music to your NAS and want to re-index:
+
+```bash
+# Auto-detects nasa.local/music (GVFS, /mnt/music, /Volumes/music, or $TUI_MUSIC_ROOT)
+./tuimusic scan
+
+# Or specify a custom mount directory and optional song limit:
+./tuimusic scan --root /run/user/1000/gvfs/smb-share:server=nasa.local,share=music --limit 500
+```
 
 ## Controls
 - `SPACE`: Play/Pause
 - `N`: Next Track
 - `P`: Previous Track
+- `S`: Shuffle Queue
 - `/`: Search YouTube Music
+- `TAB`: Switch focus between Library Tree and Upcoming Queue
+- `ENTER`: Expand/collapse folder or play selected track
 - `Q`: Quit
 
-## Configuration
-- Update `scanner.py` with your NAS mount path and run it to index local files into `songs.json`.
-- The player defaults to `./` if the NAS is not found.
+See [PORT_NOTES.md](PORT_NOTES.md) for architecture details.
 
-## Go Version
-A zero-cgo static Go port (`tuimusic`) is also included alongside the Python reference implementation. It shares the same `songs.json` index, keybindings (`SPACE`, `N`, `P`, `S`, `/`, `Q`), and external runtime tools (`mpv` and `yt-dlp`).
-
-```bash
-# Build static binary
-CGO_ENABLED=0 go build -o tuimusic ./cmd/tuimusic
-
-# Scan local library into songs.json
-./tuimusic scan --root /Volumes/music
-
-# Run the player
-./tuimusic
-```
-
-See [PORT_NOTES.md](PORT_NOTES.md) for architecture details and parity notes.

@@ -33,6 +33,128 @@ type Track struct {
 	IsLocal bool
 }
 
+// knownNASPrefixes lists common macOS and Linux NAS mount prefixes that may appear in songs.json.
+var knownNASPrefixes = []string{
+	"/Volumes/music/",
+	"/mnt/music/",
+	"/mnt/nasa/music/",
+	"/mnt/nas/music/",
+	"/media/music/",
+}
+
+// DetectMusicRoot locates the active NAS music directory across Linux and macOS.
+// It checks TUI_MUSIC_ROOT first, then common GVFS SMB/NFS mounts for nasa.local/music,
+// standard Linux /mnt and /media paths, and macOS /Volumes/music.
+func DetectMusicRoot() string {
+	if envRoot := strings.TrimSpace(os.Getenv("TUI_MUSIC_ROOT")); envRoot != "" {
+		if info, err := os.Stat(envRoot); err == nil && info.IsDir() {
+			return envRoot
+		}
+	}
+
+	// Collect candidate GVFS runtime directories on Linux (e.g., /run/user/1000/gvfs)
+	var gvfsDirs []string
+	if xdg := os.Getenv("XDG_RUNTIME_DIR"); xdg != "" {
+		gvfsDirs = append(gvfsDirs, filepath.Join(xdg, "gvfs"))
+	}
+	gvfsDirs = append(gvfsDirs, filepath.Join("/run/user", fmt.Sprintf("%d", os.Getuid()), "gvfs"))
+
+	var candidates []string
+	for _, gvfsDir := range gvfsDirs {
+		// Direct GVFS SMB/NFS mount names for nasa.local/music
+		candidates = append(candidates,
+			filepath.Join(gvfsDir, "smb-share:server=nasa.local,share=music"),
+			filepath.Join(gvfsDir, "smb-share:server=nasa,share=music"),
+			filepath.Join(gvfsDir, "nfs:host=nasa.local,prefix=/music"),
+		)
+		if entries, err := os.ReadDir(gvfsDir); err == nil {
+			for _, e := range entries {
+				nameLower := strings.ToLower(e.Name())
+				entryPath := filepath.Join(gvfsDir, e.Name())
+				if strings.Contains(nameLower, "nasa") || strings.Contains(nameLower, "music") {
+					// Check if there is a "music" subfolder inside the share or the share itself is music
+					candidates = append(candidates, filepath.Join(entryPath, "music"), entryPath)
+				}
+			}
+		}
+	}
+
+	user := os.Getenv("USER")
+	if user == "" {
+		user = "shelton"
+	}
+	home, _ := os.UserHomeDir()
+
+	candidates = append(candidates,
+		"/mnt/nasa/music",
+		"/mnt/music",
+		"/mnt/nas/music",
+		filepath.Join("/media", user, "music"),
+		filepath.Join("/media", user, "nasa", "music"),
+		"/media/music",
+		"/Volumes/music",
+	)
+	if home != "" {
+		candidates = append(candidates,
+			filepath.Join(home, "nasa", "music"),
+			filepath.Join(home, "music"),
+			filepath.Join(home, "Music", "nasa"),
+		)
+	}
+
+	for _, c := range candidates {
+		if info, err := os.Stat(c); err == nil && info.IsDir() {
+			return c
+		}
+	}
+
+	return "/Volumes/music"
+}
+
+// ResolveSongPath maps a path stored in songs.json (e.g., "/Volumes/music/Artist/Album/Track.mp3")
+// onto the active local/NAS musicRoot when running across different operating systems.
+func ResolveSongPath(rawPath, musicRoot string) string {
+	if rawPath == "" || musicRoot == "" {
+		return rawPath
+	}
+	// If the path already exists as written, keep it unchanged.
+	if _, err := os.Stat(rawPath); err == nil {
+		return rawPath
+	}
+
+	slashPath := filepath.ToSlash(rawPath)
+	for _, prefix := range knownNASPrefixes {
+		if strings.HasPrefix(slashPath, prefix) {
+			rel := strings.TrimPrefix(slashPath, prefix)
+			return filepath.Join(musicRoot, filepath.FromSlash(rel))
+		}
+	}
+
+	// Also handle paths previously scanned from a Linux GVFS or /media/<user>/music mount
+	if idx := strings.Index(slashPath, "/gvfs/"); idx != -1 {
+		rest := slashPath[idx+len("/gvfs/"):]
+		if slashIdx := strings.Index(rest, "/"); slashIdx != -1 {
+			rel := strings.TrimPrefix(rest[slashIdx+1:], "music/")
+			return filepath.Join(musicRoot, filepath.FromSlash(rel))
+		}
+	}
+
+	return rawPath
+}
+
+// ResolveSongs returns a slice of Songs with paths mapped to musicRoot if needed.
+func ResolveSongs(songs []Song, musicRoot string) []Song {
+	if musicRoot == "" {
+		return songs
+	}
+	resolved := make([]Song, len(songs))
+	for i, s := range songs {
+		s.Path = ResolveSongPath(s.Path, musicRoot)
+		resolved[i] = s
+	}
+	return resolved
+}
+
 // TrackFromSong converts a library Song into a playable queue Track.
 func TrackFromSong(s Song) Track {
 	title := s.Title
@@ -277,6 +399,14 @@ func NewTree(songs []Song) *Tree {
 	return t
 }
 
+func isMountSegment(seg string) bool {
+	s := strings.ToLower(seg)
+	if s == "" || s == "." || s == "volumes" || s == "music" || s == "mnt" || s == "media" || s == "gvfs" || s == "nasa" || s == "nasa.local" {
+		return true
+	}
+	return strings.Contains(s, "smb-share:") || strings.Contains(s, "nfs:") || strings.Contains(s, "nasa.local")
+}
+
 func deriveArtistAlbum(s Song) (string, string) {
 	artist := strings.TrimSpace(s.Artist)
 	album := strings.TrimSpace(s.Album)
@@ -285,12 +415,12 @@ func deriveArtistAlbum(s Song) (string, string) {
 	cleaned := filepath.ToSlash(filepath.Clean(s.Path))
 	parts := strings.Split(cleaned, "/")
 	if (artist == "" || artist == "Unknown Artist") && len(parts) >= 3 {
-		if candidate := parts[len(parts)-3]; candidate != "" && candidate != "." && candidate != "Volumes" && candidate != "music" {
+		if candidate := parts[len(parts)-3]; !isMountSegment(candidate) {
 			artist = candidate
 		}
 	}
 	if (album == "" || album == "Unknown Album") && len(parts) >= 2 {
-		if candidate := parts[len(parts)-2]; candidate != "" && candidate != "." && candidate != "Volumes" && candidate != "music" {
+		if candidate := parts[len(parts)-2]; !isMountSegment(candidate) {
 			album = candidate
 		}
 	}

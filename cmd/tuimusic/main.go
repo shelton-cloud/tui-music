@@ -17,7 +17,7 @@ import (
 )
 
 func printUsage() {
-	fmt.Fprintf(os.Stdout, `tuimusic - Retro CRT terminal music player (Go port)
+	fmt.Fprintf(os.Stdout, `tuimusic - Retro CRT terminal music player
 
 Usage:
   tuimusic [flags]
@@ -28,6 +28,7 @@ Commands:
 
 Flags:
   --songs string   Path to songs.json library index (default "songs.json")
+  --root string    NAS/music root directory for cross-OS path resolution (default auto-detected or $TUI_MUSIC_ROOT)
   -h, --help       Show this help message
 
 Keybindings:
@@ -43,15 +44,16 @@ Keybindings:
 }
 
 func runScan(args []string) int {
+	defaultRoot := library.DetectMusicRoot()
 	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
-	root := fs.String("root", "/Volumes/music", "Root directory to scan for audio files")
+	root := fs.String("root", defaultRoot, "Root directory to scan for audio files")
 	limit := fs.Int("limit", 0, "Optional maximum number of songs to index (0 = no limit)")
 	out := fs.String("out", "songs.json", "Output JSON file path")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
-	// Support optional positional limit argument matching `python scanner.py [limit]`
+	// Support optional positional limit argument
 	if *limit == 0 && fs.NArg() > 0 {
 		if parsed, err := strconv.Atoi(fs.Arg(0)); err == nil && parsed > 0 {
 			*limit = parsed
@@ -60,18 +62,22 @@ func runScan(args []string) int {
 
 	scanRoot := *root
 	if _, err := os.Stat(scanRoot); os.IsNotExist(err) {
-		fmt.Printf("Error: %s not found. Please ensure your NAS is mounted.\n", scanRoot)
-		if scanRoot == "/Volumes/music" {
-			scanRoot = "./"
-		} else {
-			return 1
-		}
+		fmt.Fprintf(os.Stderr, "Error: %s not found. Please ensure your NAS (e.g. smb://nasa.local/music) is mounted or pass --root <path>.\n", scanRoot)
+		return 1
 	}
 
 	songs, err := library.ScanLibrary(scanRoot, *limit)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error scanning library: %v\n", err)
 		return 1
+	}
+
+	// Safety guard: never wipe an existing populated songs.json when 0 audio files were found
+	if len(songs) == 0 {
+		if existing, loadErr := library.Load(*out); loadErr == nil && len(existing) > 0 {
+			fmt.Fprintf(os.Stderr, "Error: 0 audio files found in %s; refusing to overwrite existing %s (%d songs).\n", scanRoot, *out, len(existing))
+			return 1
+		}
 	}
 
 	if err := library.Save(*out, songs); err != nil {
@@ -89,8 +95,10 @@ func main() {
 	}
 
 	var songsPath string
+	var musicRoot string
 	var showHelp bool
 	flag.StringVar(&songsPath, "songs", "songs.json", "Path to songs.json library index")
+	flag.StringVar(&musicRoot, "root", library.DetectMusicRoot(), "Active NAS/music mount directory")
 	flag.BoolVar(&showHelp, "help", false, "Show help")
 	flag.BoolVar(&showHelp, "h", false, "Show help")
 	flag.Usage = printUsage
@@ -131,7 +139,7 @@ func main() {
 	var songs []library.Song
 	if _, err := os.Stat(songsPath); err == nil {
 		if loaded, loadErr := library.Load(songsPath); loadErr == nil {
-			songs = loaded
+			songs = library.ResolveSongs(loaded, musicRoot)
 		}
 	}
 
