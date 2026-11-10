@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"tui-music/internal/library"
 	"tui-music/internal/player"
@@ -180,9 +180,9 @@ type Model struct {
 	favoritesPath string
 	mixtapeCursor int
 
-	autoRadio      bool
-	radioFetching  bool
-	lastRadioSeed  string
+	autoRadio     bool
+	radioFetching bool
+	lastRadioSeed string
 
 	showLyrics    bool
 	lyricsLoading bool
@@ -226,7 +226,7 @@ func NewModel(p PlayerBackend, songs []library.Song, searchFn SearchFunc) *Model
 	ti := textinput.New()
 	ti.Placeholder = "Search YouTube Music for a song, artist, or mix..."
 	ti.CharLimit = 120
-	ti.Width = 50
+	ti.SetWidth(50)
 
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	q := library.NewQueue()
@@ -456,7 +456,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if m.searchOpen {
 			return m.updateSearchModal(msg)
 		}
@@ -475,7 +475,7 @@ func (m *Model) isTrackInQueue(t library.Track) bool {
 	return false
 }
 
-func (m *Model) updateSearchModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) updateSearchModal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.searchOpen = false
@@ -553,7 +553,7 @@ func (m *Model) playOrQueueImmediate(track library.Track) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-func (m *Model) updateMainView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) updateMainView(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		if m.player != nil {
@@ -561,7 +561,7 @@ func (m *Model) updateMainView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Quit
 
-	case " ":
+	case "space":
 		m.actionTogglePause()
 		return m, nil
 
@@ -1048,7 +1048,7 @@ func brailleCode(h1, h2, bThresh, tThresh float64) int {
 }
 
 // View renders the TUI screen.
-func (m *Model) View() string {
+func (m *Model) View() tea.View {
 	if m.width < 60 || m.height < 15 {
 		gateStyle := lipgloss.NewStyle().
 			Width(m.width).
@@ -1057,11 +1057,15 @@ func (m *Model) View() string {
 			Bold(true).
 			Foreground(colorAlertRed).
 			Background(colorBg)
-		return gateStyle.Render("Terminal too small! Please resize your pane.\n(Min 60x15 required)")
+		view := tea.NewView(gateStyle.Render("Terminal too small! Please resize your pane.\n(Min 60x15 required)"))
+		view.AltScreen = true
+		return view
 	}
 
 	if m.searchOpen {
-		return m.renderSearchModal()
+		view := tea.NewView(m.renderSearchModal())
+		view.AltScreen = true
+		return view
 	}
 
 	breadcrumb := breadcrumbStyle.Width(m.width).Render(m.breadcrumb)
@@ -1083,7 +1087,9 @@ func (m *Model) View() string {
 	statusText := " 󰍉 [/] YT Search | [SPACE] Pause | [N/P] Track | [R] Radio | [F] Fav | [L] Lyrics | [-/+] Vol | [1/2] Source | [Q] Quit "
 	statusBar := statusBarStyle.Width(m.width).Render(truncateStr(statusText, m.width-2))
 
-	return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, topPane, nowPlaying, statusBar)
+	view := tea.NewView(lipgloss.JoinVertical(lipgloss.Left, breadcrumb, topPane, nowPlaying, statusBar))
+	view.AltScreen = true
+	return view
 }
 
 func (m *Model) renderTopPanes(totalWidth, totalHeight int) string {

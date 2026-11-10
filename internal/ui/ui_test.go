@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"tui-music/internal/library"
 	"tui-music/internal/player"
@@ -37,14 +37,14 @@ func (m *mockPlayer) TogglePause() error {
 	return nil
 }
 
-func (m *mockPlayer) Stop() error              { return nil }
+func (m *mockPlayer) Stop() error                { return nil }
 func (m *mockPlayer) Seek(seconds float64) error { return nil }
-func (m *mockPlayer) Duration() float64        { return 180.0 }
-func (m *mockPlayer) TimePos() float64         { return 30.0 }
-func (m *mockPlayer) Paused() bool             { return m.paused }
-func (m *mockPlayer) Title() string            { return "Mock Title" }
-func (m *mockPlayer) Artist() string           { return "Mock Artist" }
-func (m *mockPlayer) PeakLevel() float64       { return 0.5 }
+func (m *mockPlayer) Duration() float64          { return 180.0 }
+func (m *mockPlayer) TimePos() float64           { return 30.0 }
+func (m *mockPlayer) Paused() bool               { return m.paused }
+func (m *mockPlayer) Title() string              { return "Mock Title" }
+func (m *mockPlayer) Artist() string             { return "Mock Artist" }
+func (m *mockPlayer) PeakLevel() float64         { return 0.5 }
 func (m *mockPlayer) Updates() <-chan player.State {
 	return m.updates
 }
@@ -67,13 +67,15 @@ func TestUIKeybindingsAndPlaybackControls(t *testing.T) {
 		}, nil
 	})
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-
+	if got := m.searchInput.Width(); got != 50 {
+		t.Fatalf("expected search input width 50, got %d", got)
+	}
 	if !m.isPlaying {
 		t.Fatalf("expected initial playback state to be playing")
 	}
 
 	// Space toggles pause
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m.Update(tea.KeyPressMsg{Code: ' ', Text: " "})
 	if m.isPlaying || !mp.paused {
 		t.Fatalf("expected space to pause playback")
 	}
@@ -88,7 +90,7 @@ func TestUIKeybindingsAndPlaybackControls(t *testing.T) {
 	}
 
 	// Space resumes playback and ticks spin the cassette reels
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m.Update(tea.KeyPressMsg{Code: ' ', Text: " "})
 	if !m.isPlaying {
 		t.Fatalf("expected space to resume playback")
 	}
@@ -100,49 +102,59 @@ func TestUIKeybindingsAndPlaybackControls(t *testing.T) {
 	}
 
 	// 'n' moves to next track, 'p' moves back to previous track
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
 	if m.queue.CurrentIndex != 1 {
 		t.Fatalf("expected CurrentIndex 1 after 'n', got %d", m.queue.CurrentIndex)
 	}
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	m.Update(tea.KeyPressMsg{Code: 'p', Text: "p"})
 	if m.queue.CurrentIndex != 0 {
 		t.Fatalf("expected CurrentIndex 0 after 'p', got %d", m.queue.CurrentIndex)
 	}
 
 	// 's' shuffles queue while preserving current track
 	curBefore, _ := m.queue.Current()
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m.Update(tea.KeyPressMsg{Code: 's', Text: "s"})
 	curAfter, _ := m.queue.Current()
 	if curBefore.Source != curAfter.Source {
 		t.Fatalf("expected current track to remain %q after shuffle, got %q", curBefore.Source, curAfter.Source)
 	}
 
 	// '/' opens search modal
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
 	if !m.searchOpen {
 		t.Fatalf("expected '/' to open search modal")
 	}
-	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	modalView := m.View()
+	if !modalView.AltScreen {
+		t.Fatal("expected search modal to remain on the alternate screen")
+	}
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.searchOpen {
 		t.Fatalf("expected ESC to close search modal")
 	}
 
 	// View renders Now Playing, cassette, and queue
 	view := m.View()
-	if !strings.Contains(view, "NASA TUI") || !strings.Contains(view, "UPCOMING QUEUE") {
+	if !view.AltScreen {
+		t.Fatal("expected full-screen UI to request the alternate screen")
+	}
+	if !strings.Contains(view.Content, "NASA TUI") || !strings.Contains(view.Content, "UPCOMING QUEUE") {
 		t.Fatalf("expected View() to render cassette and queue headers")
 	}
 
 	// Resize gate when terminal is too small
 	m.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
 	smallView := m.View()
-	if !strings.Contains(smallView, "Terminal too small!") {
-		t.Fatalf("expected resize gate on 40x10 window, got:\n%s", smallView)
+	if !smallView.AltScreen {
+		t.Fatal("expected resize-gate view to remain on the alternate screen")
+	}
+	if !strings.Contains(smallView.Content, "Terminal too small!") {
+		t.Fatalf("expected resize gate on 40x10 window, got:\n%s", smallView.Content)
 	}
 
 	// 'q' closes player and quits
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	m.Update(tea.KeyPressMsg{Code: 'q', Text: "q"})
 	if !mp.closed {
 		t.Fatalf("expected 'q' to close player backend")
 	}
@@ -187,7 +199,7 @@ func TestYouTubePrimaryAutoRadioFavoritesAndLyrics(t *testing.T) {
 			{VideoID: "yt_seed", Title: "Resonance", Artist: "HOME", Album: "Odyssey", Duration: "03:32"},
 		},
 	})
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.trackTitle != "Resonance" || m.trackArtist != "HOME" {
 		t.Fatalf("expected YT track to play immediately, got title=%q artist=%q", m.trackTitle, m.trackArtist)
 	}
@@ -212,17 +224,17 @@ func TestYouTubePrimaryAutoRadioFavoritesAndLyrics(t *testing.T) {
 	}
 
 	// Toggle favorite ('f') and synced lyrics ('l')
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
 	if len(m.favorites) != 1 || m.favorites[0].VideoID != "yt_seed" {
 		t.Fatalf("expected track to be saved to favorites, got %+v", m.favorites)
 	}
 
-	_, lyrCmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	_, lyrCmd := m.Update(tea.KeyPressMsg{Code: 'l', Text: "l"})
 	if lyrCmd != nil {
 		m.Update(lyrCmd())
 	}
 	view := m.View()
-	if !strings.Contains(view, "Cruising through the CRT glow") {
-		t.Fatalf("expected active synced lyric line in View(), got:\n%s", view)
+	if !strings.Contains(view.Content, "Cruising through the CRT glow") {
+		t.Fatalf("expected active synced lyric line in View(), got:\n%s", view.Content)
 	}
 }
