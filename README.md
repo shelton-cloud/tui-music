@@ -1,47 +1,65 @@
-# TUI Music Player 🎵
+# TUI Music Player (`tuimusic`) 🎵
 
-A retro-styled terminal music player that connects to your NAS and streams from YouTube Music.
+A retro-styled CRT terminal music player built in **Go** ([Bubble Tea](https://github.com/charmbracelet/bubbletea) + [Lip Gloss](https://github.com/charmbracelet/lipgloss)) with **YouTube Music** as the primary streaming & discovery engine and **local NAS playback** (`nasa.local/music`) as a seamless secondary source.
 
 ## Features
-- **NAS Integration**: Browse your local music library via a directory tree.
-- **YouTube Music Streaming**: Search and queue songs directly from YouTube Music.
-- **Retro UI**: CRT-inspired colors and a cassette tape animation.
-- **MPV Powered**: High-quality playback with support for various audio formats and streaming.
+- **Zero-CGO Static Binary**: Compiles to a single self-contained Go executable (`tuimusic`) with no C bindings required.
+- **YouTube Music Primary + Auto-Radio**:
+  - Fast YouTube Music search via the pure-Go Innertube API (with `yt-dlp` fallback).
+  - **Auto-Radio (`R`)**: Picking any YouTube Music track automatically queues up related radio tracks (`RDAMVM<videoId>`) in the background so the music never stops.
+- **Hybrid Mixtape Favorites (`F`)**: Dub any YouTube Music stream or local NAS track to your persistent Mixtape (`~/.config/tuimusic/favorites.json`).
+- **Time-Synced Lyrics (`L`)**: Fetches synced LRC lyrics from `lrclib.net` and highlights the current lyric line in real time in the Now Playing deck.
+- **Cross-OS NAS Integration (`1` / `2` / `M`)**: Browse your local NAS library (`Artist → Album → Track`) with automatic path resolution across Linux (`smb://nasa.local/music` via GVFS, `/mnt`, `/media`) and macOS (`/Volumes/music`). Automatically falls back to YouTube Music & Mixtape mode when away from your NAS.
+- **Retro CRT UI**: Dracula/Phosphor CRT palette, an animated `NASA TUI` cassette deck, and a high-resolution Braille wave visualizer driven by `mpv` JSON IPC.
 
 ## Prerequisites
-- **Python 3.10+**
-- **mpv**: Required for audio playback. Install via `brew install mpv` (macOS) or `sudo apt install mpv` (Linux).
-- **yt-dlp**: Required for streaming.
+- **Go 1.22+** (to build from source)
+- **mpv**: Required for audio playback (`sudo apt install mpv` on Linux or `brew install mpv` on macOS).
+- **yt-dlp**: Required for YouTube Music audio stream extraction (`sudo apt install yt-dlp` or `brew install yt-dlp`).
 
-## Installation
-1. Clone the repository.
-2. Create a virtual environment: `python -m venv venv`.
-3. Install dependencies: `./venv/bin/pip install -r requirements.txt`.
-4. Run the app: `./venv/bin/python app.py`.
-
-## Controls
-- `SPACE`: Play/Pause
-- `N`: Next Track
-- `P`: Previous Track
-- `/`: Search YouTube Music
-- `Q`: Quit
-
-## Configuration
-- Update `scanner.py` with your NAS mount path and run it to index local files into `songs.json`.
-- The player defaults to `./` if the NAS is not found.
-
-## Go Version
-A zero-cgo static Go port (`tuimusic`) is also included alongside the Python reference implementation. It shares the same `songs.json` index, keybindings (`SPACE`, `N`, `P`, `S`, `/`, `Q`), and external runtime tools (`mpv` and `yt-dlp`).
+## Building & Running
 
 ```bash
-# Build static binary
+# Build the static Go binary
 CGO_ENABLED=0 go build -o tuimusic ./cmd/tuimusic
 
-# Scan local library into songs.json
-./tuimusic scan --root /Volumes/music
-
-# Run the player
+# Run the player (starts in YT Music + Mixtape mode if NAS is offline, or loads NAS library when mounted)
 ./tuimusic
+
+# Or explicitly pass a custom NAS mount root or songs.json path:
+./tuimusic --root /path/to/nasa.local/music --songs songs.json
 ```
 
-See [PORT_NOTES.md](PORT_NOTES.md) for architecture details and parity notes.
+## Indexing Your NAS Library (`scan`)
+
+`tuimusic` automatically translates `/Volumes/music/...` paths in `songs.json` to your active Linux or macOS NAS mount at runtime, so you can share the same `songs.json` across machines without re-scanning.
+
+When you add new music to your NAS and want to re-index:
+
+```bash
+# Auto-detects nasa.local/music (GVFS, /mnt/music, /Volumes/music, or $TUI_MUSIC_ROOT)
+./tuimusic scan
+
+# Or specify a custom mount directory and optional song limit:
+./tuimusic scan --root /Volumes/music --limit 500
+```
+
+## Controls
+| Key | Action |
+| :--- | :--- |
+| `/` | Search YouTube Music (`ENTER` to play immediately + start Auto-Radio, `TAB` to queue next) |
+| `SPACE` | Toggle Play / Pause (pauses cassette reel animation) |
+| `N` / `P` | Next / Previous track in queue |
+| `S` | Shuffle current queue |
+| `R` | Toggle YouTube Music Auto-Radio (`[RADIO:ON/OFF]`) |
+| `F` | Save / remove current or highlighted track in Favorites Mixtape (`★`) |
+| `L` | Toggle real-time Synced Lyrics in the Now Playing deck |
+| `D` / `X` | Remove highlighted track from the Upcoming Queue |
+| `-` / `+` | Volume Down / Up ($\pm 5\%$) |
+| `,` / `.` | Seek Backward / Forward ($\pm 5\text{s}$) |
+| `1` / `2` / `M` | Switch Left Pane between `[1] YT Music & Mixtape` and `[2] NAS Library Tree` |
+| `TAB` | Switch focus between Left Pane and Upcoming Queue |
+| `ENTER` | Play selected track or expand/collapse folder in NAS Tree |
+| `Q` | Quit application |
+
+See [PORT_NOTES.md](PORT_NOTES.md) for architecture details.

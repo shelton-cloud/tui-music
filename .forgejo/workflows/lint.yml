@@ -1,4 +1,4 @@
-name: Pylint
+name: Go CI
 
 on:
   push:
@@ -7,44 +7,8 @@ on:
     branches: [main]
 
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-    container:
-      image: python:3.11-bookworm
-    steps:
-      - name: Clone repository
-        env:
-          GIT_USERNAME: ${{ secrets.GIT_USERNAME }}
-          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
-        run: |
-          which git || (apt-get update -qq && apt-get install -y -qq git)
-          umask 077
-          NETRC="$HOME/.netrc"
-          trap 'rm -f "$NETRC"' EXIT
-          printf 'machine forgejo.sheltsville.com login %s password %s\n' "$GIT_USERNAME" "$GIT_TOKEN" > "$NETRC"
-          git clone https://forgejo.sheltsville.com/shelton/tui-music.git .
-          git checkout ${{ github.sha }}
-
-      - name: Install system dependencies
-        run: |
-          apt-get update -qq
-          apt-get install -y -qq libmpv-dev mpv
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pylint
-          pip install -r requirements.txt
-
-      - name: Analysing the code with pylint
-        run: |
-          pylint $(git ls-files '*.py') --rcfile=.pylintrc
-
   go:
-    # Separate job so the Python lint above keeps its own toolchain and image.
-    # The Go port must stay cgo-free and build as a single static binary — that is
-    # the entire reason it exists, so the check is part of CI rather than a README
-    # promise.
+    # The Go binary must stay cgo-free and build as a single static binary.
     runs-on: ubuntu-latest
     container:
       image: golang:1.27-bookworm
@@ -84,4 +48,3 @@ jobs:
             exit 1
           fi
           echo "static binary OK ($(du -h /tmp/tuimusic | cut -f1))"
-

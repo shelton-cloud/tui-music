@@ -1,55 +1,64 @@
-# TUI Music Player: Project Context
+# TUI Music Player (`tuimusic`): Project Context
 
 ## Overview
-`tui-music` is a retro-styled, terminal-based music player built with Python and the [Textual](https://textual.textualize.io/) framework. It integrates local file playback (optimized for NAS mounts) with YouTube Music streaming capabilities.
+`tui-music` (`tuimusic`) is a retro-styled, terminal-based music player built in **Go** using the [Bubble Tea](https://github.com/charmbracelet/bubbletea) and [Lip Gloss](https://github.com/charmbracelet/lipgloss) frameworks. It uses **YouTube Music** as the primary streaming and discovery source (with Auto-Radio, Mixtape favorites, and synced lyrics) alongside **local NAS file playback** (`nasa.local/music` across Linux and macOS) as a secondary source.
 
 ## Architecture
-- **TUI Layer (`app.py`):** Handles the user interface, including the queue, search modals, and a dynamic **animated cassette tape** widget.
-- **Playback Engine (`player_backend.py`):** A wrapper around `python-mpv`. It uses **automatic audio driver detection** for cross-platform compatibility and handles metadata/progress observation.
-- **Data Ingestion (`scanner.py`):** Scans a root directory (e.g., a NAS mount) and extracts rich metadata (**Artist, Title, Album**) using the `mutagen` library, persisting results to `songs.json`.
-- **Streaming:** Leverages `ytmusicapi` for searching and `yt-dlp` (via mpv's ytdl integration) for high-quality audio streaming.
+- **Entrypoint (`cmd/tuimusic/main.go`):** CLI flag parsing (`--songs`, `--root`, `scan` subcommand), startup binary verification (`mpv` and `yt-dlp`), NAS reachability check, and signal-safe lifecycle management.
+- **TUI Layer (`internal/ui/ui.go`):** Bubble Tea state machine rendering the dual-mode left pane (`[1] YT Music & Mixtape` vs. `[2] NAS Artist → Album → Track Tree`), the Upcoming Queue, YouTube Music search modal, dynamic **animated cassette tape** widget, synced lyrics display, and Braille wave visualizer.
+- **Playback Engine (`internal/player/player.go`):** Spawns headless `mpv` (`--ytdl=yes --cache=yes`) as a child process and communicates over a Unix domain socket using mpv's JSON IPC protocol (observing `time-pos`, `duration`, `pause`, `metadata`, `path`, `af-metadata`, and `volume`).
+- **YouTube Music & Lyrics (`internal/youtube/youtube.go`):** Queries YouTube Music's `WEB_REMIX` Innertube `search` and `next` (`RDAMVM` Auto-Radio) endpoints directly over HTTP with automatic `yt-dlp` fallback, and fetches time-synced LRC lyrics from `lrclib.net`.
+- **Library, Favorites & Scanner (`internal/library/library.go`):** Pure-Go audio metadata parser (`github.com/dhowden/tag`), `songs.json` persistence, hybrid YT/NAS favorites persistence (`~/.config/tuimusic/favorites.json`), and automatic cross-OS NAS path translation.
 
 ## Tech Stack
-- **Framework:** Textual (TUI)
-- **Audio Engine:** MPV (via `python-mpv`)
-- **Metadata/Search:** `ytmusicapi` & `mutagen` (local tags)
-- **Streaming:** `yt-dlp`
-- **Styling:** `rich` (integrated into Textual)
+- **Language:** Go (`CGO_ENABLED=0` static binary)
+- **TUI Framework:** Bubble Tea, Bubbles, Lip Gloss (`charmbracelet`)
+- **Audio Engine:** System `mpv` via Unix socket JSON IPC
+- **Metadata/Tags:** `github.com/dhowden/tag` (pure Go ID3/FLAC/M4A/OGG)
+- **Streaming & Discovery:** YouTube Music Innertube HTTP API + `yt-dlp` (via `mpv`) + `lrclib.net` (synced lyrics)
 
 ## Prerequisites
-1. **Python 3.10+**
-2. **System mpv:** 
+1. **Go 1.22+**
+2. **System mpv:**
    - macOS: `brew install mpv`
    - Linux: `sudo apt install mpv`
-3. **yt-dlp:** Required for streaming playback.
-4. **Mutagen:** Required for local metadata parsing (installed via `pip`).
+3. **yt-dlp:** Required for YouTube Music audio streaming (`brew install yt-dlp` or `sudo apt install yt-dlp`).
 
 ## Development Commands
-- **Install Dependencies:**
+- **Build Static Binary:**
   ```bash
-  python -m venv venv
-  source venv/bin/activate
-  pip install -r requirements.txt
-  pip install mutagen  # Ensure mutagen is present
+  CGO_ENABLED=0 go build -o tuimusic ./cmd/tuimusic
   ```
-- **Scan Local Library:**
+- **Run Unit Tests & Vet:**
   ```bash
-  python scanner.py [limit]
+  go vet ./...
+  go test -v ./...
   ```
-  *Note: You can pass an optional numeric limit to the scanner. Edit `scanner.py` to point to your NAS mount path.*
+- **Scan Local NAS Library:**
+  ```bash
+  ./tuimusic scan [--root /path/to/music] [--limit N]
+  ```
 - **Run the Application:**
   ```bash
-  python app.py
+  ./tuimusic
   ```
 
 ## UI & Controls
-- **SPACE:** Toggle Play/Pause. (Animation stops on pause).
-- **N / P:** Next/Previous track in queue.
-- **S:** Shuffle the current queue.
-- ** / (Slash):** Open YouTube Music search modal.
-- **Q:** Quit application.
+- **`/` (Slash):** Open YouTube Music search modal (`ENTER` plays immediately + starts Auto-Radio; `TAB` queues without interrupting).
+- **`SPACE`:** Toggle Play/Pause (reel animation stops on pause).
+- **`N` / `P`:** Next / Previous track in queue.
+- **`S`:** Shuffle the current queue.
+- **`R`:** Toggle YouTube Music Auto-Radio (`[RADIO:ON/OFF]`).
+- **`F`:** Toggle track in persistent Favorites Mixtape (`★`).
+- **`L`:** Toggle real-time Synced Lyrics in the Now Playing panel.
+- **`D` / `X`:** Remove highlighted track from the queue.
+- **`-` / `+`:** Adjust volume ($\pm 5\%$).
+- **`,` / `.`:** Seek backward / forward ($\pm 5\text{s}$).
+- **`1` / `2` / `M`:** Switch Left Pane between YT Mixtape (`1`) and NAS Library Tree (`2`).
+- **`TAB`:** Switch focus between Left Pane and Upcoming Queue.
+- **`Q`:** Quit application.
 
 ## Conventions
-- **Queue Shuffling:** The application automatically shuffles the entire library and loads a random selection of 200 tracks on startup.
-- **Metadata Priority:** Local files use internal tags (ID3/FLAC/etc.) first, falling back to the filename if tags are missing.
-- **Visuals:** Double-line box drawing and animated reels (Braille/Block characters) define the "Cassette" aesthetic.
+- **YouTube Music Primary / NAS Secondary:** When the NAS mount is unavailable at startup, `tuimusic` starts cleanly in YouTube Music & Mixtape mode without queueing unplayable local paths.
+- **Metadata Priority:** YouTube streams preserve clean YT Music `Title`, `Artist`, and `Album` metadata over raw `mpv` stream filenames. Local files use embedded tags first, falling back to directory/filename structure.
+- **Visuals:** Double-line box drawing, CRT phosphor accents, and animated reels (`◐`, `◓`, `◑`, `◒`) define the "Cassette" aesthetic.
