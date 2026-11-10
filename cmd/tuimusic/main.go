@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"syscall"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"tui-music/internal/library"
 	"tui-music/internal/player"
@@ -153,7 +153,7 @@ func main() {
 	model := ui.NewModel(mpvClient, songs, youtube.Search)
 	model.ConfigurePrimaryYTMusic(nasMounted)
 
-	prog := tea.NewProgram(model, tea.WithAltScreen())
+	prog := tea.NewProgram(model)
 	if _, err := prog.Run(); err != nil {
 		_ = mpvClient.Close()
 		fmt.Fprintf(os.Stderr, "Application error: %v\n", err)
