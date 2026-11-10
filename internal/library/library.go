@@ -25,12 +25,219 @@ type Song struct {
 
 // Track represents an item in the playback queue (either a local Song or a stream).
 type Track struct {
-	Title   string
-	Artist  string
-	Album   string
-	Source  string
-	VideoID string
-	IsLocal bool
+	Title   string `json:"title"`
+	Artist  string `json:"artist"`
+	Album   string `json:"album"`
+	Source  string `json:"source"`
+	VideoID string `json:"video_id,omitempty"`
+	IsLocal bool   `json:"is_local"`
+}
+
+// knownNASPrefixes lists common macOS and Linux NAS mount prefixes that may appear in songs.json.
+var knownNASPrefixes = []string{
+	"/Volumes/music/",
+	"/mnt/music/",
+	"/mnt/nasa/music/",
+	"/mnt/nas/music/",
+	"/media/music/",
+}
+
+// DetectMusicRoot locates the active NAS music directory across Linux and macOS.
+// It checks TUI_MUSIC_ROOT first, then common GVFS SMB/NFS mounts for nasa.local/music,
+// standard Linux /mnt and /media paths, and macOS /Volumes/music.
+func DetectMusicRoot() string {
+	if envRoot := strings.TrimSpace(os.Getenv("TUI_MUSIC_ROOT")); envRoot != "" {
+		if info, err := os.Stat(envRoot); err == nil && info.IsDir() {
+			return envRoot
+		}
+	}
+
+	var gvfsDirs []string
+	if xdg := os.Getenv("XDG_RUNTIME_DIR"); xdg != "" {
+		gvfsDirs = append(gvfsDirs, filepath.Join(xdg, "gvfs"))
+	}
+	gvfsDirs = append(gvfsDirs, filepath.Join("/run/user", fmt.Sprintf("%d", os.Getuid()), "gvfs"))
+
+	var candidates []string
+	for _, gvfsDir := range gvfsDirs {
+		candidates = append(candidates,
+			filepath.Join(gvfsDir, "smb-share:server=nasa.local,share=music"),
+			filepath.Join(gvfsDir, "smb-share:server=nasa,share=music"),
+			filepath.Join(gvfsDir, "nfs:host=nasa.local,prefix=/music"),
+		)
+		if entries, err := os.ReadDir(gvfsDir); err == nil {
+			for _, e := range entries {
+				nameLower := strings.ToLower(e.Name())
+				entryPath := filepath.Join(gvfsDir, e.Name())
+				if strings.Contains(nameLower, "nasa") || strings.Contains(nameLower, "music") {
+					candidates = append(candidates, filepath.Join(entryPath, "music"), entryPath)
+				}
+			}
+		}
+	}
+
+	user := os.Getenv("USER")
+	if user == "" {
+		user = "shelton"
+	}
+	home, _ := os.UserHomeDir()
+
+	candidates = append(candidates,
+		"/mnt/nasa/music",
+		"/mnt/music",
+		"/mnt/nas/music",
+		filepath.Join("/media", user, "music"),
+		filepath.Join("/media", user, "nasa", "music"),
+		"/media/music",
+		"/Volumes/music",
+	)
+	if home != "" {
+		candidates = append(candidates,
+			filepath.Join(home, "nasa", "music"),
+			filepath.Join(home, "music"),
+			filepath.Join(home, "Music", "nasa"),
+		)
+	}
+
+	for _, c := range candidates {
+		if info, err := os.Stat(c); err == nil && info.IsDir() {
+			return c
+		}
+	}
+
+	return "/Volumes/music"
+}
+
+// ResolveSongPath maps a path stored in songs.json (e.g., "/Volumes/music/Artist/Album/Track.mp3")
+// onto the active local/NAS musicRoot when running across different operating systems.
+func ResolveSongPath(rawPath, musicRoot string) string {
+	if rawPath == "" || musicRoot == "" {
+		return rawPath
+	}
+	if _, err := os.Stat(rawPath); err == nil {
+		return rawPath
+	}
+
+	slashPath := filepath.ToSlash(rawPath)
+	for _, prefix := range knownNASPrefixes {
+		if strings.HasPrefix(slashPath, prefix) {
+			rel := strings.TrimPrefix(slashPath, prefix)
+			return filepath.Join(musicRoot, filepath.FromSlash(rel))
+		}
+	}
+
+	if idx := strings.Index(slashPath, "/gvfs/"); idx != -1 {
+		rest := slashPath[idx+len("/gvfs/"):]
+		if slashIdx := strings.Index(rest, "/"); slashIdx != -1 {
+			rel := strings.TrimPrefix(rest[slashIdx+1:], "music/")
+			return filepath.Join(musicRoot, filepath.FromSlash(rel))
+		}
+	}
+
+	return rawPath
+}
+
+// ResolveSongs returns a slice of Songs with paths mapped to musicRoot if needed.
+func ResolveSongs(songs []Song, musicRoot string) []Song {
+	if musicRoot == "" {
+		return songs
+	}
+	resolved := make([]Song, len(songs))
+	for i, s := range songs {
+		s.Path = ResolveSongPath(s.Path, musicRoot)
+		resolved[i] = s
+	}
+	return resolved
+}
+
+// IsNASAvailable checks whether the musicRoot directory exists or any sample song path in songs is reachable.
+func IsNASAvailable(songs []Song, musicRoot string) bool {
+	if musicRoot != "" {
+		if info, err := os.Stat(musicRoot); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	limit := 10
+	if len(songs) < limit {
+		limit = len(songs)
+	}
+	for i := 0; i < limit; i++ {
+		if _, err := os.Stat(songs[i].Path); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// DefaultFavoritesPath returns the user config path for storing hybrid YT/NAS favorite tracks.
+func DefaultFavoritesPath() string {
+	if envPath := strings.TrimSpace(os.Getenv("TUI_MUSIC_FAVORITES")); envPath != "" {
+		return envPath
+	}
+	if cfgDir, err := os.UserConfigDir(); err == nil && cfgDir != "" {
+		return filepath.Join(cfgDir, "tuimusic", "favorites.json")
+	}
+	return "favorites.json"
+}
+
+// LoadFavorites reads saved favorite tracks from disk.
+func LoadFavorites(filePath string) ([]Track, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var tracks []Track
+	if err := json.Unmarshal(data, &tracks); err != nil {
+		return nil, err
+	}
+	return tracks, nil
+}
+
+// SaveFavorites writes favorite tracks to disk, creating parent directories if needed.
+func SaveFavorites(filePath string, tracks []Track) error {
+	if tracks == nil {
+		tracks = []Track{}
+	}
+	if dir := filepath.Dir(filePath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	out, err := json.MarshalIndent(tracks, "", "    ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filePath, out, 0o644)
+}
+
+// IsFavorite checks whether target is present in the favorites slice.
+func IsFavorite(favorites []Track, target Track) bool {
+	for _, f := range favorites {
+		if TracksMatch(f, target) {
+			return true
+		}
+	}
+	return false
+}
+
+// ToggleFavorite adds target to favorites if not present, or removes it if already present.
+// It returns the updated slice and true if the track is now a favorite.
+func ToggleFavorite(favorites []Track, target Track) ([]Track, bool) {
+	for i, f := range favorites {
+		if TracksMatch(f, target) {
+			updated := make([]Track, 0, len(favorites)-1)
+			updated = append(updated, favorites[:i]...)
+			updated = append(updated, favorites[i+1:]...)
+			return updated, false
+		}
+	}
+	updated := make([]Track, len(favorites), len(favorites)+1)
+	copy(updated, favorites)
+	updated = append(updated, target)
+	return updated, true
 }
 
 // TrackFromSong converts a library Song into a playable queue Track.
@@ -277,6 +484,14 @@ func NewTree(songs []Song) *Tree {
 	return t
 }
 
+func isMountSegment(seg string) bool {
+	s := strings.ToLower(seg)
+	if s == "" || s == "." || s == "volumes" || s == "music" || s == "mnt" || s == "media" || s == "gvfs" || s == "nasa" || s == "nasa.local" {
+		return true
+	}
+	return strings.Contains(s, "smb-share:") || strings.Contains(s, "nfs:") || strings.Contains(s, "nasa.local")
+}
+
 func deriveArtistAlbum(s Song) (string, string) {
 	artist := strings.TrimSpace(s.Artist)
 	album := strings.TrimSpace(s.Album)
@@ -285,12 +500,12 @@ func deriveArtistAlbum(s Song) (string, string) {
 	cleaned := filepath.ToSlash(filepath.Clean(s.Path))
 	parts := strings.Split(cleaned, "/")
 	if (artist == "" || artist == "Unknown Artist") && len(parts) >= 3 {
-		if candidate := parts[len(parts)-3]; candidate != "" && candidate != "." && candidate != "Volumes" && candidate != "music" {
+		if candidate := parts[len(parts)-3]; !isMountSegment(candidate) {
 			artist = candidate
 		}
 	}
 	if (album == "" || album == "Unknown Album") && len(parts) >= 2 {
-		if candidate := parts[len(parts)-2]; candidate != "" && candidate != "." && candidate != "Volumes" && candidate != "music" {
+		if candidate := parts[len(parts)-2]; !isMountSegment(candidate) {
 			album = candidate
 		}
 	}
@@ -444,6 +659,26 @@ func (q *Queue) Prev() (Track, bool) {
 	return Track{}, false
 }
 
+// Remove deletes the item at idx from the queue and adjusts CurrentIndex.
+// It returns true if the removed track was the currently playing track.
+func (q *Queue) Remove(idx int) (removedCurrent bool) {
+	if idx < 0 || idx >= len(q.Items) {
+		return false
+	}
+	removedCurrent = idx == q.CurrentIndex
+	q.Items = append(q.Items[:idx], q.Items[idx+1:]...)
+	if len(q.Items) == 0 {
+		q.CurrentIndex = -1
+		return removedCurrent
+	}
+	if idx < q.CurrentIndex {
+		q.CurrentIndex--
+	} else if q.CurrentIndex >= len(q.Items) {
+		q.CurrentIndex = len(q.Items) - 1
+	}
+	return removedCurrent
+}
+
 // Shuffle randomises the queue order while updating CurrentIndex so the currently playing track stays active.
 func (q *Queue) Shuffle(rng *rand.Rand) {
 	if len(q.Items) == 0 {
@@ -465,7 +700,7 @@ func (q *Queue) Shuffle(rng *rand.Rand) {
 
 	if hasCurrent {
 		for i, item := range q.Items {
-			if tracksMatch(current, item) {
+			if TracksMatch(current, item) {
 				q.CurrentIndex = i
 				return
 			}
@@ -475,7 +710,8 @@ func (q *Queue) Shuffle(rng *rand.Rand) {
 	}
 }
 
-func tracksMatch(a, b Track) bool {
+// TracksMatch reports whether two Tracks refer to the same local file or YouTube video.
+func TracksMatch(a, b Track) bool {
 	if a.IsLocal && b.IsLocal {
 		return a.Source == b.Source
 	}
@@ -483,4 +719,8 @@ func tracksMatch(a, b Track) bool {
 		return a.VideoID == b.VideoID
 	}
 	return a.Source == b.Source
+}
+
+func tracksMatch(a, b Track) bool {
+	return TracksMatch(a, b)
 }

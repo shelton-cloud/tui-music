@@ -21,6 +21,7 @@ import (
 type State struct {
 	TimePos   float64
 	Duration  float64
+	Volume    float64
 	Paused    bool
 	Title     string
 	Artist    string
@@ -53,6 +54,7 @@ type Client struct {
 
 	timePos   float64
 	duration  float64
+	volume    float64
 	paused    bool
 	path      string
 	metadata  map[string]string
@@ -83,6 +85,7 @@ func Start() (*Client, error) {
 		"--no-video",
 		"--no-terminal",
 		"--ytdl=yes",
+		"--cache=yes",
 		"--af=lavfi=[astats=metadata=1:reset=1]",
 		"--input-ipc-server="+sockPath,
 	)
@@ -135,6 +138,7 @@ func newClient(conn net.Conn, sockPath, tempDir string, cmd *exec.Cmd) *Client {
 		cmd:        cmd,
 		socketPath: sockPath,
 		tempDir:    tempDir,
+		volume:     100,
 		metadata:   make(map[string]string),
 		updates:    make(chan State, 32),
 		closed:     make(chan struct{}),
@@ -151,6 +155,7 @@ func (c *Client) registerObservers() error {
 		"metadata",
 		"path",
 		"af-metadata",
+		"volume",
 	}
 	for i, prop := range props {
 		if err := c.sendCommand([]any{"observe_property", i + 1, prop}); err != nil {
@@ -217,6 +222,36 @@ func (c *Client) Stop() error {
 // Seek seeks relative to the current playback position by seconds.
 func (c *Client) Seek(seconds float64) error {
 	return c.sendCommand([]any{"seek", seconds, "relative"})
+}
+
+// Volume returns the current volume percentage (0-130).
+func (c *Client) Volume() float64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.volume
+}
+
+// SetVolume sets the player volume percentage (clamped to [0, 130]).
+func (c *Client) SetVolume(vol float64) error {
+	if vol < 0 {
+		vol = 0
+	}
+	if vol > 130 {
+		vol = 130
+	}
+	c.mu.Lock()
+	c.volume = vol
+	c.mu.Unlock()
+	c.emitState(false)
+	return c.sendCommand([]any{"set_property", "volume", vol})
+}
+
+// AdjustVolume changes the player volume by delta percentage points.
+func (c *Client) AdjustVolume(delta float64) error {
+	c.mu.RLock()
+	cur := c.volume
+	c.mu.RUnlock()
+	return c.SetVolume(cur + delta)
 }
 
 // Duration returns the current track duration in seconds.
@@ -303,6 +338,7 @@ func (c *Client) Snapshot() State {
 	return State{
 		TimePos:   c.timePos,
 		Duration:  c.duration,
+		Volume:    c.volume,
 		Paused:    c.paused,
 		Title:     c.titleLocked(),
 		Artist:    c.artistLocked(),
@@ -395,6 +431,12 @@ func (c *Client) handlePropertyChange(name string, raw json.RawMessage) {
 				c.peakLevel = peak
 				changed = true
 			}
+		}
+	case "volume":
+		var v float64
+		if json.Unmarshal(raw, &v) == nil {
+			c.volume = v
+			changed = true
 		}
 	}
 	c.mu.Unlock()

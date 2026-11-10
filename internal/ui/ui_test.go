@@ -147,3 +147,82 @@ func TestUIKeybindingsAndPlaybackControls(t *testing.T) {
 		t.Fatalf("expected 'q' to close player backend")
 	}
 }
+
+func TestYouTubePrimaryAutoRadioFavoritesAndLyrics(t *testing.T) {
+	mp := newMockPlayer()
+	songs := []library.Song{
+		{Path: "/unmounted/nas/Song1.mp3", Title: "Song 1", Artist: "Artist A", Album: "Album 1"},
+	}
+
+	m := NewModel(mp, songs, func(ctx context.Context, query string) ([]youtube.Result, error) {
+		return []youtube.Result{
+			{VideoID: "yt_seed", Title: "Resonance", Artist: "HOME", Album: "Odyssey", Duration: "03:32"},
+		}, nil
+	})
+	m.SetFavoritesPath(t.TempDir() + "/favorites.json")
+	m.SetRadioFunc(func(ctx context.Context, videoID string, limit int) ([]youtube.Result, error) {
+		return []youtube.Result{
+			{VideoID: "yt_radio_1", Title: "SimpsonWave1995", Artist: "FrankJavCee", Duration: "02:21"},
+			{VideoID: "yt_radio_2", Title: "Macintosh Plus", Artist: "Vektroid", Duration: "07:20"},
+		}, nil
+	})
+	m.SetLyricsFunc(func(ctx context.Context, title, artist string) ([]youtube.LyricLine, error) {
+		return []youtube.LyricLine{
+			{TimeSec: 0, Text: "Synth intro"},
+			{TimeSec: 25, Text: "Cruising through the CRT glow"},
+		}, nil
+	})
+	m.Update(tea.WindowSizeMsg{Width: 110, Height: 32})
+
+	// Configure with NAS offline -> switches to Mixtape mode and clears unmounted NAS queue
+	m.ConfigurePrimaryYTMusic(false)
+	if len(m.queue.Items) != 0 {
+		t.Fatalf("expected unmounted NAS queue to be cleared when NAS is offline, got %d items", len(m.queue.Items))
+	}
+
+	// Simulate search results arriving and pressing ENTER to play + trigger Auto-Radio
+	m.searchOpen = true
+	m.Update(searchResultsMsg{
+		results: []youtube.Result{
+			{VideoID: "yt_seed", Title: "Resonance", Artist: "HOME", Album: "Odyssey", Duration: "03:32"},
+		},
+	})
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.trackTitle != "Resonance" || m.trackArtist != "HOME" {
+		t.Fatalf("expected YT track to play immediately, got title=%q artist=%q", m.trackTitle, m.trackArtist)
+	}
+	// Execute the returned Auto-Radio command
+	if cmd != nil {
+		msg := cmd()
+		m.Update(msg)
+	}
+	if len(m.queue.Items) != 3 {
+		t.Fatalf("expected seed track + 2 auto-radio tracks in queue, got %d", len(m.queue.Items))
+	}
+
+	// Verify mpv raw stream title does not overwrite clean YT Music metadata
+	m.Update(playerStateMsg(player.State{
+		TimePos:  28.0,
+		Duration: 212.0,
+		Title:    "watch?v=yt_seed",
+		Artist:   "Unknown Artist",
+	}))
+	if m.trackTitle != "Resonance" || m.trackArtist != "HOME" {
+		t.Fatalf("expected YT metadata to be preserved over mpv fallback, got %q - %q", m.trackTitle, m.trackArtist)
+	}
+
+	// Toggle favorite ('f') and synced lyrics ('l')
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	if len(m.favorites) != 1 || m.favorites[0].VideoID != "yt_seed" {
+		t.Fatalf("expected track to be saved to favorites, got %+v", m.favorites)
+	}
+
+	_, lyrCmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	if lyrCmd != nil {
+		m.Update(lyrCmd())
+	}
+	view := m.View()
+	if !strings.Contains(view, "Cruising through the CRT glow") {
+		t.Fatalf("expected active synced lyric line in View(), got:\n%s", view)
+	}
+}

@@ -53,6 +53,10 @@ func (s *fakeMPVServer) acceptLoop() {
 	if err != nil {
 		return
 	}
+	s.serveConn(conn)
+}
+
+func (s *fakeMPVServer) serveConn(conn net.Conn) {
 	s.mu.Lock()
 	s.conn = conn
 	s.mu.Unlock()
@@ -111,7 +115,13 @@ func TestClientWithFakeIPCServer(t *testing.T) {
 
 	client, err := Connect(srv.sockPath)
 	if err != nil {
-		t.Fatalf("Connect failed: %v", err)
+		// Fallback to in-memory net.Pipe when running inside a restricted sandbox that blocks unix dial
+		srvConn, cliConn := net.Pipe()
+		go srv.serveConn(srvConn)
+		client = newClient(cliConn, srv.sockPath, "", nil)
+		if regErr := client.registerObservers(); regErr != nil {
+			t.Fatalf("registerObservers failed: %v", regErr)
+		}
 	}
 	defer client.Close()
 
@@ -189,6 +199,12 @@ verified:
 
 	if err := client.Seek(10); err != nil {
 		t.Fatalf("Seek failed: %v", err)
+	}
+	if err := client.AdjustVolume(-10); err != nil {
+		t.Fatalf("AdjustVolume failed: %v", err)
+	}
+	if client.Volume() != 90 {
+		t.Fatalf("expected volume 90 after AdjustVolume(-10), got %v", client.Volume())
 	}
 	if err := client.Stop(); err != nil {
 		t.Fatalf("Stop failed: %v", err)

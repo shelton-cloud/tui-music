@@ -35,14 +35,34 @@ type PlayerBackend interface {
 	Close() error
 }
 
+// VolumeController is an optional extension implemented by player.Client for volume control.
+type VolumeController interface {
+	Volume() float64
+	SetVolume(vol float64) error
+	AdjustVolume(delta float64) error
+}
+
 // SearchFunc resolves a YouTube Music search query into results.
 type SearchFunc func(ctx context.Context, query string) ([]youtube.Result, error)
+
+// RadioFunc resolves a seed YouTube VideoID into an "Up Next" radio track list.
+type RadioFunc func(ctx context.Context, videoID string, limit int) ([]youtube.Result, error)
+
+// LyricsFunc resolves track title and artist into synced or plain lyric lines.
+type LyricsFunc func(ctx context.Context, title, artist string) ([]youtube.LyricLine, error)
 
 type paneFocus int
 
 const (
 	focusQueue paneFocus = iota
 	focusTree
+)
+
+type leftPaneMode int
+
+const (
+	modeMixtape leftPaneMode = iota
+	modeNASTree
 )
 
 var (
@@ -60,16 +80,16 @@ var (
 
 // Retro CRT palette (Dracula + Phosphor Green & Amber CRT accents)
 var (
-	colorBg         = lipgloss.Color("#282a36")
-	colorDarkBg     = lipgloss.Color("#1e1f29")
-	colorHeaderBg   = lipgloss.Color("#343746")
-	colorPhosphor   = lipgloss.Color("#50fa7b")
-	colorAmber      = lipgloss.Color("#ffb86c")
-	colorPink       = lipgloss.Color("#ff79c6")
-	colorCyan       = lipgloss.Color("#8be9fd")
-	colorPurple     = lipgloss.Color("#bd93f9")
-	colorMuted      = lipgloss.Color("#6272a4")
-	colorAlertRed   = lipgloss.Color("#ff5555")
+	colorBg       = lipgloss.Color("#282a36")
+	colorDarkBg   = lipgloss.Color("#1e1f29")
+	colorHeaderBg = lipgloss.Color("#343746")
+	colorPhosphor = lipgloss.Color("#50fa7b")
+	colorAmber    = lipgloss.Color("#ffb86c")
+	colorPink     = lipgloss.Color("#ff79c6")
+	colorCyan     = lipgloss.Color("#8be9fd")
+	colorPurple   = lipgloss.Color("#bd93f9")
+	colorMuted    = lipgloss.Color("#6272a4")
+	colorAlertRed = lipgloss.Color("#ff5555")
 
 	breadcrumbStyle = lipgloss.NewStyle().
 			Background(colorHeaderBg).
@@ -130,16 +150,44 @@ type searchResultsMsg struct {
 	results []youtube.Result
 	err     error
 }
+type radioResultsMsg struct {
+	seedVideoID string
+	results     []youtube.Result
+	err         error
+}
+type lyricsResultMsg struct {
+	title  string
+	artist string
+	lines  []youtube.LyricLine
+	err    error
+}
 
 // Model is the Bubble Tea state model for tui-music.
 type Model struct {
 	player     PlayerBackend
 	searchFn   SearchFunc
+	radioFn    RadioFunc
+	lyricsFn   LyricsFunc
 	allSongs   []library.Song
 	tree       *library.Tree
 	queue      *library.Queue
 	queueIndex int
 	focus      paneFocus
+	leftMode   leftPaneMode
+	nasMounted bool
+
+	favorites     []library.Track
+	favoritesPath string
+	mixtapeCursor int
+
+	autoRadio      bool
+	radioFetching  bool
+	lastRadioSeed  string
+
+	showLyrics    bool
+	lyricsLoading bool
+	lyricsKey     string
+	lyricsLines   []youtube.LyricLine
 
 	width      int
 	height     int
@@ -152,6 +200,7 @@ type Model struct {
 	trackAlbum      string
 	timePos         float64
 	duration        float64
+	volume          float64
 	peakLevel       float64
 
 	reelIndex   int
@@ -175,7 +224,7 @@ func NewModel(p PlayerBackend, songs []library.Song, searchFn SearchFunc) *Model
 		searchFn = youtube.Search
 	}
 	ti := textinput.New()
-	ti.Placeholder = "Search for a song..."
+	ti.Placeholder = "Search YouTube Music for a song, artist, or mix..."
 	ti.CharLimit = 120
 	ti.Width = 50
 
@@ -183,28 +232,111 @@ func NewModel(p PlayerBackend, songs []library.Song, searchFn SearchFunc) *Model
 	q := library.NewQueue()
 	q.LoadInitialFromLibrary(songs, rng)
 
+	favPath := library.DefaultFavoritesPath()
+	favs, _ := library.LoadFavorites(favPath)
+
+	leftMode := modeNASTree
+	if len(songs) == 0 {
+		leftMode = modeMixtape
+	}
+
+	vol := 100.0
+	if vc, ok := p.(VolumeController); ok {
+		if v := vc.Volume(); v > 0 {
+			vol = v
+		}
+	}
+
 	m := &Model{
-		player:      p,
-		searchFn:    searchFn,
-		allSongs:    songs,
-		tree:        library.NewTree(songs),
-		queue:       q,
-		focus:       focusQueue,
-		width:       80,
-		height:      24,
-		breadcrumb:  "󰎆 NASA TUI",
-		trackTitle:  "No Track Playing",
-		trackArtist: "",
-		trackAlbum:  "",
-		waveHistory: make([]float64, 100),
-		searchInput: ti,
-		rng:         rng,
+		player:        p,
+		searchFn:      searchFn,
+		radioFn:       youtube.FetchRadio,
+		lyricsFn:      youtube.FetchLyrics,
+		allSongs:      songs,
+		tree:          library.NewTree(songs),
+		queue:         q,
+		focus:         focusQueue,
+		leftMode:      leftMode,
+		nasMounted:    len(songs) > 0,
+		favorites:     favs,
+		favoritesPath: favPath,
+		autoRadio:     true,
+		width:         80,
+		height:        24,
+		breadcrumb:    "󰎆 NASA TUI",
+		trackTitle:    "No Track Playing",
+		trackArtist:   "",
+		trackAlbum:    "",
+		volume:        vol,
+		waveHistory:   make([]float64, 100),
+		searchInput:   ti,
+		rng:           rng,
 	}
 
 	if len(m.queue.Items) > 0 {
 		m.playTrack(0)
+	} else if len(m.favorites) > 0 {
+		for _, fav := range m.favorites {
+			m.queue.Add(fav, false)
+		}
+		m.playTrack(0)
 	}
 	return m
+}
+
+// ConfigurePrimaryYTMusic configures the model at startup when YouTube Music is primary
+// and checks whether the local NAS mount is actually reachable.
+func (m *Model) ConfigurePrimaryYTMusic(nasMounted bool) {
+	m.nasMounted = nasMounted
+	if !nasMounted {
+		m.leftMode = modeMixtape
+		// Clear unmounted NAS tracks from the startup queue so we don't queue unplayable paths
+		m.queue.Items = nil
+		m.queue.CurrentIndex = -1
+		m.queueIndex = 0
+		m.isPlaying = false
+		if m.player != nil {
+			_ = m.player.Stop()
+		}
+		if len(m.favorites) > 0 {
+			for _, fav := range m.favorites {
+				if !fav.IsLocal || fileExists(fav.Source) {
+					m.queue.Add(fav, false)
+				}
+			}
+		}
+		if len(m.queue.Items) > 0 {
+			m.playTrack(0)
+		} else {
+			m.trackTitle = "Press [/] to Search YouTube Music"
+			m.trackArtist = "YouTube Music Primary • NAS Offline"
+			m.trackAlbum = "Ready"
+			m.breadcrumb = "󰎆 YT MUSIC PRIMARY (NAS OFFLINE — PRESS [/] TO SEARCH)"
+		}
+	}
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// SetRadioFunc overrides the YouTube Music Auto-Radio fetcher (useful for testing).
+func (m *Model) SetRadioFunc(fn RadioFunc) {
+	m.radioFn = fn
+}
+
+// SetLyricsFunc overrides the lyrics fetcher (useful for testing).
+func (m *Model) SetLyricsFunc(fn LyricsFunc) {
+	m.lyricsFn = fn
+}
+
+// SetFavoritesPath overrides the file path used to persist favorites (useful for testing).
+func (m *Model) SetFavoritesPath(path string) {
+	m.favoritesPath = path
+	if favs, err := library.LoadFavorites(path); err == nil {
+		m.favorites = favs
+	}
 }
 
 // Init starts the animation ticker and subscribes to non-blocking mpv state updates.
@@ -238,6 +370,37 @@ func waitForPlayerState(p PlayerBackend) tea.Cmd {
 	}
 }
 
+func (m *Model) fetchRadioCmd(videoID string) tea.Cmd {
+	if m.radioFn == nil || videoID == "" || m.radioFetching || m.lastRadioSeed == videoID {
+		return nil
+	}
+	m.radioFetching = true
+	m.lastRadioSeed = videoID
+	fn := m.radioFn
+	return func() tea.Msg {
+		res, err := fn(context.Background(), videoID, 15)
+		return radioResultsMsg{seedVideoID: videoID, results: res, err: err}
+	}
+}
+
+func (m *Model) fetchLyricsCmd(title, artist string) tea.Cmd {
+	if m.lyricsFn == nil || title == "" || title == "No Track Playing" {
+		return nil
+	}
+	key := strings.ToLower(strings.TrimSpace(title) + "|" + strings.TrimSpace(artist))
+	if m.lyricsKey == key && (m.lyricsLoading || len(m.lyricsLines) > 0) {
+		return nil
+	}
+	m.lyricsKey = key
+	m.lyricsLoading = true
+	m.lyricsLines = nil
+	fn := m.lyricsFn
+	return func() tea.Msg {
+		lines, err := fn(context.Background(), title, artist)
+		return lyricsResultMsg{title: title, artist: artist, lines: lines, err: err}
+	}
+}
+
 // Update handles keyboard input, terminal resizes, animation ticks, and mpv IPC updates.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -256,8 +419,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickCmd()
 
 	case playerStateMsg:
-		m.applyPlayerState(player.State(msg))
-		return m, waitForPlayerState(m.player)
+		cmd := m.applyPlayerState(player.State(msg))
+		return m, tea.Batch(waitForPlayerState(m.player), cmd)
 
 	case searchResultsMsg:
 		if msg.err != nil {
@@ -265,7 +428,31 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.searchResults = msg.results
 			m.searchCursor = 0
-			m.searchStatus = fmt.Sprintf("Found %d results", len(msg.results))
+			m.searchStatus = fmt.Sprintf("Found %d results — [ENTER] Play Now | [TAB] Queue Next", len(msg.results))
+		}
+		return m, nil
+
+	case radioResultsMsg:
+		m.radioFetching = false
+		if msg.err == nil && len(msg.results) > 0 {
+			added := 0
+			for _, r := range msg.results {
+				track := r.ToTrack()
+				if !m.isTrackInQueue(track) {
+					m.queue.Add(track, false)
+					added++
+				}
+			}
+			if added > 0 {
+				m.breadcrumb = fmt.Sprintf("STREAMING > YT RADIO > +%d UP NEXT TRACKS QUEUED", added)
+			}
+		}
+		return m, nil
+
+	case lyricsResultMsg:
+		m.lyricsLoading = false
+		if msg.err == nil {
+			m.lyricsLines = msg.lines
 		}
 		return m, nil
 
@@ -277,6 +464,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m *Model) isTrackInQueue(t library.Track) bool {
+	for _, item := range m.queue.Items {
+		if library.TracksMatch(item, t) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Model) updateSearchModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -298,16 +494,28 @@ func (m *Model) updateSearchModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case "tab", "ctrl+a":
+		// Append highlighted result to queue without closing search modal or interrupting playback
+		if len(m.searchResults) > 0 && m.searchCursor >= 0 && m.searchCursor < len(m.searchResults) && m.searchStatus != "Searching..." {
+			selected := m.searchResults[m.searchCursor]
+			track := selected.ToTrack()
+			m.addTrackToQueue(track, false)
+			m.searchStatus = fmt.Sprintf("Queued: %s - %s", track.Title, track.Artist)
+			if m.autoRadio && track.VideoID != "" {
+				return m, m.fetchRadioCmd(track.VideoID)
+			}
+		}
+		return m, nil
+
 	case "enter":
-		// If results are already displayed and the user navigated or submitted the same query,
-		// allow Enter on a highlighted result when input isn't modified, or run search if results are empty.
 		query := strings.TrimSpace(m.searchInput.Value())
 		if len(m.searchResults) > 0 && m.searchCursor >= 0 && m.searchCursor < len(m.searchResults) && m.searchStatus != "Searching..." {
 			selected := m.searchResults[m.searchCursor]
 			m.searchOpen = false
 			m.searchInput.Blur()
-			m.addTrackToQueue(selected.ToTrack(), true)
-			return m, nil
+			track := selected.ToTrack()
+			cmd := m.playOrQueueImmediate(track)
+			return m, cmd
 		}
 		if query != "" {
 			m.searchStatus = "Searching..."
@@ -331,6 +539,20 @@ func (m *Model) updateSearchModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m *Model) playOrQueueImmediate(track library.Track) tea.Cmd {
+	m.queue.Add(track, false)
+	idx := len(m.queue.Items) - 1
+	m.playTrack(idx)
+	var cmds []tea.Cmd
+	if m.autoRadio && track.VideoID != "" {
+		cmds = append(cmds, m.fetchRadioCmd(track.VideoID))
+	}
+	if m.showLyrics {
+		cmds = append(cmds, m.fetchLyricsCmd(track.Title, track.Artist))
+	}
+	return tea.Batch(cmds...)
+}
+
 func (m *Model) updateMainView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
@@ -344,20 +566,98 @@ func (m *Model) updateMainView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "n":
-		m.actionNextTrack()
-		return m, nil
+		return m, m.actionNextTrack()
 
 	case "p":
-		m.actionPrevTrack()
-		return m, nil
+		return m, m.actionPrevTrack()
 
 	case "s":
 		m.actionShuffle()
 		return m, nil
 
+	case "r":
+		m.autoRadio = !m.autoRadio
+		state := "OFF"
+		if m.autoRadio {
+			state = "ON"
+		}
+		m.breadcrumb = fmt.Sprintf("󰎆 YOUTUBE AUTO-RADIO: %s", state)
+		if m.autoRadio {
+			if cur, ok := m.queue.Current(); ok && cur.VideoID != "" {
+				return m, m.fetchRadioCmd(cur.VideoID)
+			}
+		}
+		return m, nil
+
+	case "f":
+		m.actionToggleFavorite()
+		return m, nil
+
+	case "l":
+		m.showLyrics = !m.showLyrics
+		if m.showLyrics {
+			return m, m.fetchLyricsCmd(m.trackTitle, m.trackArtist)
+		}
+		return m, nil
+
+	case "d", "x", "backspace", "delete":
+		if m.focus == focusQueue && len(m.queue.Items) > 0 {
+			removedCurrent := m.queue.Remove(m.queueIndex)
+			if m.queueIndex >= len(m.queue.Items) && m.queueIndex > 0 {
+				m.queueIndex = len(m.queue.Items) - 1
+			}
+			if removedCurrent {
+				if len(m.queue.Items) > 0 && m.queue.CurrentIndex >= 0 {
+					m.playTrack(m.queue.CurrentIndex)
+				} else if m.player != nil {
+					_ = m.player.Stop()
+					m.isPlaying = false
+				}
+			}
+		}
+		return m, nil
+
+	case "-", "_":
+		m.actionAdjustVolume(-5)
+		return m, nil
+
+	case "+", "=":
+		m.actionAdjustVolume(5)
+		return m, nil
+
+	case ",", "[":
+		if m.player != nil {
+			_ = m.player.Seek(-5)
+		}
+		return m, nil
+
+	case ".", "]":
+		if m.player != nil {
+			_ = m.player.Seek(5)
+		}
+		return m, nil
+
+	case "1":
+		m.leftMode = modeMixtape
+		m.focus = focusTree
+		return m, nil
+
+	case "2":
+		m.leftMode = modeNASTree
+		m.focus = focusTree
+		return m, nil
+
+	case "m":
+		if m.leftMode == modeMixtape {
+			m.leftMode = modeNASTree
+		} else {
+			m.leftMode = modeMixtape
+		}
+		return m, nil
+
 	case "/":
 		m.searchOpen = true
-		m.searchStatus = "Press ENTER to search YouTube Music, then ENTER again to queue"
+		m.searchStatus = "Press ENTER to search YouTube Music, then ENTER to play (or TAB to queue)"
 		m.searchResults = nil
 		m.searchCursor = 0
 		m.searchInput.SetValue("")
@@ -374,7 +674,13 @@ func (m *Model) updateMainView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "up":
 		if m.focus == focusTree {
-			m.tree.MoveUp()
+			if m.leftMode == modeMixtape {
+				if m.mixtapeCursor > 0 {
+					m.mixtapeCursor--
+				}
+			} else {
+				m.tree.MoveUp()
+			}
 		} else if m.queueIndex > 0 {
 			m.queueIndex--
 		}
@@ -382,7 +688,13 @@ func (m *Model) updateMainView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "down":
 		if m.focus == focusTree {
-			m.tree.MoveDown()
+			if m.leftMode == modeMixtape {
+				if m.mixtapeCursor+1 < len(m.favorites) {
+					m.mixtapeCursor++
+				}
+			} else {
+				m.tree.MoveDown()
+			}
 		} else if m.queueIndex+1 < len(m.queue.Items) {
 			m.queueIndex++
 		}
@@ -390,6 +702,13 @@ func (m *Model) updateMainView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "enter":
 		if m.focus == focusTree {
+			if m.leftMode == modeMixtape {
+				if m.mixtapeCursor >= 0 && m.mixtapeCursor < len(m.favorites) {
+					fav := m.favorites[m.mixtapeCursor]
+					return m, m.playOrQueueImmediate(fav)
+				}
+				return m, nil
+			}
 			if song := m.tree.Activate(); song != nil {
 				track := library.TrackFromSong(*song)
 				m.addTrackToQueue(track, true)
@@ -398,11 +717,51 @@ func (m *Model) updateMainView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		} else {
 			m.playTrack(m.queueIndex)
+			if m.showLyrics {
+				return m, m.fetchLyricsCmd(m.trackTitle, m.trackArtist)
+			}
 		}
 		return m, nil
 	}
 
 	return m, nil
+}
+
+func (m *Model) actionAdjustVolume(delta float64) {
+	if vc, ok := m.player.(VolumeController); ok {
+		_ = vc.AdjustVolume(delta)
+		m.volume = vc.Volume()
+		return
+	}
+	m.volume = math.Max(0, math.Min(130, m.volume+delta))
+}
+
+func (m *Model) actionToggleFavorite() {
+	var target library.Track
+	var ok bool
+	if m.focus == focusQueue && m.queueIndex >= 0 && m.queueIndex < len(m.queue.Items) {
+		target = m.queue.Items[m.queueIndex]
+		ok = true
+	} else if cur, hasCur := m.queue.Current(); hasCur {
+		target = cur
+		ok = true
+	}
+	if !ok {
+		return
+	}
+	var added bool
+	m.favorites, added = library.ToggleFavorite(m.favorites, target)
+	if m.favoritesPath != "" {
+		_ = library.SaveFavorites(m.favoritesPath, m.favorites)
+	}
+	if m.mixtapeCursor >= len(m.favorites) && len(m.favorites) > 0 {
+		m.mixtapeCursor = len(m.favorites) - 1
+	}
+	if added {
+		m.breadcrumb = fmt.Sprintf("★ SAVED TO MIXTAPE: %s - %s", target.Title, target.Artist)
+	} else {
+		m.breadcrumb = fmt.Sprintf("☆ REMOVED FROM MIXTAPE: %s - %s", target.Title, target.Artist)
+	}
 }
 
 func (m *Model) addTrackToQueue(track library.Track, playNow bool) {
@@ -467,7 +826,7 @@ func (m *Model) anyLocalFileExists() bool {
 	checked := 0
 	for _, item := range m.queue.Items {
 		if !item.IsLocal {
-			continue
+			return true
 		}
 		if _, err := os.Stat(item.Source); err == nil {
 			return true
@@ -489,20 +848,35 @@ func (m *Model) actionTogglePause() {
 	}
 }
 
-func (m *Model) actionNextTrack() {
+func (m *Model) actionNextTrack() tea.Cmd {
 	if m.isTransitioning {
-		return
+		return nil
 	}
 	if m.queue.CurrentIndex+1 < len(m.queue.Items) {
 		m.isTransitioning = true
 		m.playTrack(m.queue.CurrentIndex + 1)
+		var cmds []tea.Cmd
+		if m.showLyrics {
+			cmds = append(cmds, m.fetchLyricsCmd(m.trackTitle, m.trackArtist))
+		}
+		if m.autoRadio && len(m.queue.Items)-m.queue.CurrentIndex <= 3 {
+			if cur, ok := m.queue.Current(); ok && cur.VideoID != "" {
+				cmds = append(cmds, m.fetchRadioCmd(cur.VideoID))
+			}
+		}
+		return tea.Batch(cmds...)
 	}
+	return nil
 }
 
-func (m *Model) actionPrevTrack() {
+func (m *Model) actionPrevTrack() tea.Cmd {
 	if m.queue.CurrentIndex-1 >= 0 {
 		m.playTrack(m.queue.CurrentIndex - 1)
+		if m.showLyrics {
+			return m.fetchLyricsCmd(m.trackTitle, m.trackArtist)
+		}
 	}
+	return nil
 }
 
 func (m *Model) actionShuffle() {
@@ -517,30 +891,43 @@ func (m *Model) actionShuffle() {
 	}
 }
 
-func (m *Model) applyPlayerState(st player.State) {
+func (m *Model) applyPlayerState(st player.State) tea.Cmd {
 	m.timePos = st.TimePos
 	if st.Duration > 0 {
 		m.duration = st.Duration
 	}
+	if st.Volume > 0 {
+		m.volume = st.Volume
+	}
 	m.isPlaying = !st.Paused
 	m.peakLevel = st.PeakLevel
 
-	if st.Title != "" && st.Title != "No Track Playing" {
-		m.trackTitle = st.Title
+	cur, hasCur := m.queue.Current()
+	isYTStream := hasCur && !cur.IsLocal
+
+	// For YouTube streams, preserve the clean track metadata from YT Music rather than
+	// overwriting with mpv's raw stream title or "Unknown Artist".
+	if !isYTStream || m.trackTitle == "" || m.trackTitle == "No Track Playing" {
+		if st.Title != "" && st.Title != "No Track Playing" {
+			m.trackTitle = st.Title
+		}
 	}
-	if st.Artist != "" && st.Artist != "Unknown Artist" {
-		m.trackArtist = st.Artist
+	if !isYTStream || m.trackArtist == "" || m.trackArtist == "Unknown" || m.trackArtist == "Unknown Artist" {
+		if st.Artist != "" && st.Artist != "Unknown Artist" {
+			m.trackArtist = st.Artist
+		}
 	}
-	if cur, ok := m.queue.Current(); ok && m.trackAlbum == "" {
+	if hasCur && m.trackAlbum == "" {
 		m.trackAlbum = cur.Album
 	}
 
 	// Auto-next on EOF or within 0.8s of duration (matching app.py line 590)
 	if !m.isTransitioning {
 		if st.EOF || (m.duration > 0 && m.timePos >= m.duration-0.8) {
-			m.actionNextTrack()
+			return m.actionNextTrack()
 		}
 	}
+	return nil
 }
 
 func (m *Model) stepWaveVisualizer() {
@@ -693,7 +1080,7 @@ func (m *Model) View() string {
 	topPane := m.renderTopPanes(m.width, topHeight)
 	nowPlaying := m.renderNowPlaying(m.width, nowPlayingHeight)
 
-	statusText := " 󰍉 [/] Search | 󰐊 [SPACE] Pause | 󰒭 [N] Next | 󰒮 [P] Prev | 󰒝 [S] Shuffle | [TAB] Tree/Queue | 󰈆 [Q] Quit "
+	statusText := " 󰍉 [/] YT Search | [SPACE] Pause | [N/P] Track | [R] Radio | [F] Fav | [L] Lyrics | [-/+] Vol | [1/2] Source | [Q] Quit "
 	statusBar := statusBarStyle.Width(m.width).Render(truncateStr(statusText, m.width-2))
 
 	return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, topPane, nowPlaying, statusBar)
@@ -731,23 +1118,74 @@ func (m *Model) renderTopPanes(totalWidth, totalHeight int) string {
 		Width(rightWidth - 2).
 		Height(innerHeight)
 
-	treeContent := m.renderTreeList(leftWidth-4, innerHeight-1, treeHdrStyle)
+	var leftContent string
+	if m.leftMode == modeMixtape {
+		leftContent = m.renderMixtapeList(leftWidth-4, innerHeight-1, treeHdrStyle)
+	} else {
+		leftContent = m.renderTreeList(leftWidth-4, innerHeight-1, treeHdrStyle)
+	}
 	queueContent := m.renderQueueList(rightWidth-4, innerHeight-1, queueHdrStyle)
 
 	return lipgloss.JoinHorizontal(
 		lipgloss.Top,
-		treeBoxStyle.Render(treeContent),
+		treeBoxStyle.Render(leftContent),
 		queueBoxStyle.Render(queueContent),
 	)
 }
 
+func (m *Model) renderMixtapeList(width, listHeight int, hdrStyle lipgloss.Style) string {
+	nasTag := "NAS: OFFLINE"
+	if m.nasMounted {
+		nasTag = "NAS: READY [2]"
+	}
+	header := hdrStyle.Width(width).Render(truncateStr(fmt.Sprintf(" ★ YT MUSIC & MIXTAPE (%s) ", nasTag), width))
+	if listHeight < 1 {
+		return header
+	}
+	if len(m.favorites) == 0 {
+		hint := []string{
+			header,
+			lipgloss.NewStyle().Foreground(colorCyan).Render(" 󰍉 Press [/] to search YouTube Music"),
+			lipgloss.NewStyle().Foreground(colorMuted).Render(" ★ Press [F] on any track to dub it to your Mixtape"),
+			lipgloss.NewStyle().Foreground(colorMuted).Render(" 󰒝 Auto-Radio [R] automatically queues related YT songs"),
+			lipgloss.NewStyle().Foreground(colorMuted).Render(" 󰙅 Press [2] or [M] to switch to NAS Library Tree"),
+		}
+		if len(hint) > listHeight+1 {
+			hint = hint[:listHeight+1]
+		}
+		return strings.Join(hint, "\n")
+	}
+
+	start, end := visibleWindow(m.mixtapeCursor, len(m.favorites), listHeight)
+	rows := make([]string, 0, listHeight+1)
+	rows = append(rows, header)
+
+	for i := start; i < end; i++ {
+		fav := m.favorites[i]
+		badge := "[YT]"
+		if fav.IsLocal {
+			badge = "[NAS]"
+		}
+		line := truncateStr(fmt.Sprintf(" ★ %s %s - %s", badge, fav.Title, fav.Artist), width)
+		if i == m.mixtapeCursor && m.focus == focusTree {
+			line = cursorRowStyle.Width(width).Render(line)
+		}
+		rows = append(rows, line)
+	}
+	return strings.Join(rows, "\n")
+}
+
 func (m *Model) renderTreeList(width, listHeight int, hdrStyle lipgloss.Style) string {
-	header := hdrStyle.Width(width).Render(" 󰙅 LIBRARY (Artist → Album → Track) ")
+	mountBadge := ""
+	if !m.nasMounted {
+		mountBadge = " [UNMOUNTED]"
+	}
+	header := hdrStyle.Width(width).Render(truncateStr(" 󰙅 LIBRARY (Artist → Album → Track)"+mountBadge+" ", width))
 	if listHeight < 1 {
 		return header
 	}
 	if len(m.tree.Visible) == 0 {
-		return header + "\n" + lipgloss.NewStyle().Foreground(colorMuted).Render(" (No songs loaded in songs.json)")
+		return header + "\n" + lipgloss.NewStyle().Foreground(colorMuted).Render(" (No songs loaded in songs.json — press [/] for YT Music)")
 	}
 
 	start, end := visibleWindow(m.tree.Cursor, len(m.tree.Visible), listHeight)
@@ -778,12 +1216,16 @@ func (m *Model) renderTreeList(width, listHeight int, hdrStyle lipgloss.Style) s
 }
 
 func (m *Model) renderQueueList(width, listHeight int, hdrStyle lipgloss.Style) string {
-	header := hdrStyle.Width(width).Render(" 󰎆 UPCOMING QUEUE ")
+	radioTag := "RADIO:OFF"
+	if m.autoRadio {
+		radioTag = "RADIO:ON"
+	}
+	header := hdrStyle.Width(width).Render(truncateStr(fmt.Sprintf(" 󰎆 UPCOMING QUEUE (%d • %s) ", len(m.queue.Items), radioTag), width))
 	if listHeight < 1 {
 		return header
 	}
 	if len(m.queue.Items) == 0 {
-		return header + "\n" + lipgloss.NewStyle().Foreground(colorMuted).Render(" (Queue is empty)")
+		return header + "\n" + lipgloss.NewStyle().Foreground(colorMuted).Render(" (Queue is empty — press [/] to search YouTube Music)")
 	}
 
 	start, end := visibleWindow(m.queueIndex, len(m.queue.Items), listHeight)
@@ -796,7 +1238,15 @@ func (m *Model) renderQueueList(width, listHeight int, hdrStyle lipgloss.Style) 
 		if i == m.queue.CurrentIndex {
 			prefix = " ▶ "
 		}
-		line := truncateStr(fmt.Sprintf("%s%s - %s", prefix, item.Title, item.Artist), width)
+		favStar := ""
+		if library.IsFavorite(m.favorites, item) {
+			favStar = "★ "
+		}
+		srcBadge := "[YT] "
+		if item.IsLocal {
+			srcBadge = "[NAS] "
+		}
+		line := truncateStr(fmt.Sprintf("%s%s%s%s - %s", prefix, favStar, srcBadge, item.Title, item.Artist), width)
 		switch {
 		case i == m.queueIndex && m.focus == focusQueue:
 			line = cursorRowStyle.Width(width).Render(line)
@@ -831,9 +1281,22 @@ func (m *Model) renderNowPlaying(totalWidth, totalHeight int) string {
 	if m.isPlaying {
 		stateBadge = "[PLAYING]"
 	}
-	titleLine := titleStyle.Render(truncateStr(m.trackTitle, infoWidth))
+	radioBadge := "[RADIO:OFF]"
+	if m.autoRadio {
+		radioBadge = "[RADIO:ON]"
+	}
+	favBadge := ""
+	if cur, ok := m.queue.Current(); ok && library.IsFavorite(m.favorites, cur) {
+		favBadge = " ★"
+	}
+	volBadge := fmt.Sprintf("VOL:%d%%", int(math.Round(m.volume)))
+
+	titleLine := titleStyle.Render(truncateStr(m.trackTitle+favBadge, infoWidth))
 	artistLine := artistStyle.Render(truncateStr("Artist: "+nonEmpty(m.trackArtist, "Unknown Artist"), infoWidth))
-	albumLine := albumStyle.Render(truncateStr("Album:  "+nonEmpty(m.trackAlbum, "Unknown Album")+"  "+stateBadge, infoWidth))
+	albumLine := albumStyle.Render(truncateStr(
+		fmt.Sprintf("Album:  %s  %s %s [%s]", nonEmpty(m.trackAlbum, "Unknown Album"), stateBadge, radioBadge, volBadge),
+		infoWidth,
+	))
 
 	var pct float64
 	if m.duration > 0 {
@@ -843,8 +1306,13 @@ func (m *Model) renderNowPlaying(totalWidth, totalHeight int) string {
 	timeStr := fmt.Sprintf("%s / %s", FormatTime(m.timePos), FormatTime(m.duration))
 	timeLine := artistStyle.Width(infoWidth).Align(lipgloss.Right).Render(timeStr)
 
+	middleBlock := ""
+	if m.showLyrics {
+		middleBlock = m.renderActiveLyrics(infoWidth)
+	}
+
 	rightColumn := lipgloss.NewStyle().PaddingLeft(2).Render(
-		lipgloss.JoinVertical(lipgloss.Left, titleLine, artistLine, albumLine, "", bar, timeLine),
+		lipgloss.JoinVertical(lipgloss.Left, titleLine, artistLine, albumLine, middleBlock, bar, timeLine),
 	)
 
 	boxStyle := lipgloss.NewStyle().
@@ -853,6 +1321,24 @@ func (m *Model) renderNowPlaying(totalWidth, totalHeight int) string {
 		Width(totalWidth - 2)
 
 	return boxStyle.Render(lipgloss.JoinHorizontal(lipgloss.Top, leftColumn, rightColumn))
+}
+
+func (m *Model) renderActiveLyrics(width int) string {
+	if m.lyricsLoading {
+		return lipgloss.NewStyle().Foreground(colorMuted).Italic(true).Render(truncateStr("♪ Fetching synced lyrics...", width))
+	}
+	if len(m.lyricsLines) == 0 {
+		return lipgloss.NewStyle().Foreground(colorMuted).Italic(true).Render(truncateStr("♪ (No synced lyrics found for this track)", width))
+	}
+
+	activeIdx := 0
+	for i, l := range m.lyricsLines {
+		if l.TimeSec >= 0 && l.TimeSec <= m.timePos+0.25 {
+			activeIdx = i
+		}
+	}
+	lineText := "♪ " + m.lyricsLines[activeIdx].Text
+	return lipgloss.NewStyle().Bold(true).Foreground(colorPhosphor).Render(truncateStr(lineText, width))
 }
 
 func renderProgressBar(percent float64, barWidth int) string {
@@ -882,7 +1368,7 @@ func (m *Model) renderSearchModal() string {
 		modalHeight = 12
 	}
 
-	title := lipgloss.NewStyle().Bold(true).Foreground(colorPink).Render("󰍉 SEARCH YOUTUBE MUSIC")
+	title := lipgloss.NewStyle().Bold(true).Foreground(colorPink).Render("󰍉 SEARCH YOUTUBE MUSIC (PRIMARY STREAMING + AUTO-RADIO)")
 	inputView := m.searchInput.View()
 	statusView := lipgloss.NewStyle().Foreground(colorAmber).Render(m.searchStatus)
 
@@ -894,7 +1380,11 @@ func (m *Model) renderSearchModal() string {
 	start, end := visibleWindow(m.searchCursor, len(m.searchResults), maxResults)
 	for i := start; i < end; i++ {
 		r := m.searchResults[i]
-		line := truncateStr(fmt.Sprintf("[%s] %s - %s", r.Duration, r.Title, r.Artist), modalWidth-6)
+		albumSuffix := ""
+		if r.Album != "" && r.Album != "YouTube Music" {
+			albumSuffix = " • " + r.Album
+		}
+		line := truncateStr(fmt.Sprintf("[%s] %s - %s%s", r.Duration, r.Title, r.Artist, albumSuffix), modalWidth-6)
 		if i == m.searchCursor {
 			line = cursorRowStyle.Width(modalWidth - 6).Render("▶ " + line)
 		} else {
@@ -912,7 +1402,7 @@ func (m *Model) renderSearchModal() string {
 		Height(maxResults).
 		Render(strings.Join(resultLines, "\n"))
 
-	help := lipgloss.NewStyle().Foreground(colorPhosphor).Render(" 󰐊 [ENTER] Search/Queue | 󰒭 [UP/DOWN] Select | 󰈆 [ESC] Close ")
+	help := lipgloss.NewStyle().Foreground(colorPhosphor).Render(" 󰐊 [ENTER] Search / Play + Radio | [TAB] Queue Only | 󰒭 [UP/DOWN] Select | 󰈆 [ESC] Close ")
 
 	content := lipgloss.JoinVertical(lipgloss.Left, title, "", inputView, statusView, resultsBox, help)
 	modalBox := lipgloss.NewStyle().

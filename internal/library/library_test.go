@@ -218,3 +218,51 @@ func TestQueueOperationsAndShuffle(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveSongPathCrossOSAndFavorites(t *testing.T) {
+	linuxRoot := "/run/user/1000/gvfs/smb-share:server=nasa.local,share=music"
+	macPath := "/Volumes/music/2Pac/All Eyez On Me/California Love.mp3"
+
+	got := ResolveSongPath(macPath, linuxRoot)
+	want := filepath.Join(linuxRoot, "2Pac", "All Eyez On Me", "California Love.mp3")
+	if got != want {
+		t.Fatalf("ResolveSongPath(%q, %q) = %q, want %q", macPath, linuxRoot, got, want)
+	}
+
+	gotMac := ResolveSongPath(want, "/Volumes/music")
+	if gotMac != macPath {
+		t.Fatalf("ResolveSongPath(%q, /Volumes/music) = %q, want %q", want, gotMac, macPath)
+	}
+
+	tmpDir := t.TempDir()
+	t.Setenv("TUI_MUSIC_ROOT", tmpDir)
+	if detected := DetectMusicRoot(); detected != tmpDir {
+		t.Fatalf("DetectMusicRoot() = %q, want %q", detected, tmpDir)
+	}
+
+	// Test Favorites persistence and ToggleFavorite
+	favPath := filepath.Join(tmpDir, "favorites.json")
+	ytTrack := Track{
+		Title:   "Midnight City",
+		Artist:  "M83",
+		Album:   "Hurry Up, We're Dreaming",
+		Source:  "https://www.youtube.com/watch?v=dX3k_QDnzHE",
+		VideoID: "dX3k_QDnzHE",
+		IsLocal: false,
+	}
+	favs, added := ToggleFavorite(nil, ytTrack)
+	if !added || len(favs) != 1 || !IsFavorite(favs, ytTrack) {
+		t.Fatalf("expected track to be added to favorites")
+	}
+	if err := SaveFavorites(favPath, favs); err != nil {
+		t.Fatalf("SaveFavorites failed: %v", err)
+	}
+	loadedFavs, err := LoadFavorites(favPath)
+	if err != nil || len(loadedFavs) != 1 || loadedFavs[0].VideoID != "dX3k_QDnzHE" {
+		t.Fatalf("LoadFavorites mismatch: %+v, err=%v", loadedFavs, err)
+	}
+	favs, added = ToggleFavorite(loadedFavs, ytTrack)
+	if added || len(favs) != 0 {
+		t.Fatalf("expected second ToggleFavorite to remove track")
+	}
+}
