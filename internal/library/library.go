@@ -3,6 +3,7 @@ package library
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"math/rand"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/dhowden/tag"
 )
@@ -42,12 +44,63 @@ var knownNASPrefixes = []string{
 	"/media/music/",
 }
 
+const (
+	nasMountProbeTimeout = 750 * time.Millisecond
+	nasFileProbeTimeout  = 400 * time.Millisecond
+)
+
+func statWithTimeout(path string, timeout time.Duration) (os.FileInfo, error) {
+	type statResult struct {
+		info os.FileInfo
+		err  error
+	}
+	ch := make(chan statResult, 1)
+	go func() {
+		info, err := os.Stat(path)
+		ch <- statResult{info: info, err: err}
+	}()
+	select {
+	case res := <-ch:
+		return res.info, res.err
+	case <-time.After(timeout):
+		return nil, os.ErrDeadlineExceeded
+	}
+}
+
+func readDirWithTimeout(path string, timeout time.Duration) ([]os.DirEntry, error) {
+	type dirResult struct {
+		entries []os.DirEntry
+		err     error
+	}
+	ch := make(chan dirResult, 1)
+	go func() {
+		entries, err := os.ReadDir(path)
+		ch <- dirResult{entries: entries, err: err}
+	}()
+	select {
+	case res := <-ch:
+		return res.entries, res.err
+	case <-time.After(timeout):
+		return nil, os.ErrDeadlineExceeded
+	}
+}
+
+// PathExistsFast checks whether path exists on disk within a short timeout so
+// sleeping or stale network/SMB mounts cannot stall the UI thread.
+func PathExistsFast(path string) bool {
+	if path == "" {
+		return false
+	}
+	_, err := statWithTimeout(path, nasFileProbeTimeout)
+	return err == nil
+}
+
 // DetectMusicRoot locates the active NAS music directory across Linux and macOS.
 // It checks TUI_MUSIC_ROOT first, then common GVFS SMB/NFS mounts for nasa.local/music,
 // standard Linux /mnt and /media paths, and macOS /Volumes/music.
 func DetectMusicRoot() string {
 	if envRoot := strings.TrimSpace(os.Getenv("TUI_MUSIC_ROOT")); envRoot != "" {
-		if info, err := os.Stat(envRoot); err == nil && info.IsDir() {
+		if info, err := statWithTimeout(envRoot, nasMountProbeTimeout); err == nil && info.IsDir() {
 			return envRoot
 		}
 	}
@@ -65,12 +118,14 @@ func DetectMusicRoot() string {
 			filepath.Join(gvfsDir, "smb-share:server=nasa,share=music"),
 			filepath.Join(gvfsDir, "nfs:host=nasa.local,prefix=/music"),
 		)
-		if entries, err := os.ReadDir(gvfsDir); err == nil {
-			for _, e := range entries {
-				nameLower := strings.ToLower(e.Name())
-				entryPath := filepath.Join(gvfsDir, e.Name())
-				if strings.Contains(nameLower, "nasa") || strings.Contains(nameLower, "music") {
-					candidates = append(candidates, filepath.Join(entryPath, "music"), entryPath)
+		if info, err := statWithTimeout(gvfsDir, nasMountProbeTimeout); err == nil && info.IsDir() {
+			if entries, err := readDirWithTimeout(gvfsDir, nasMountProbeTimeout); err == nil {
+				for _, e := range entries {
+					nameLower := strings.ToLower(e.Name())
+					entryPath := filepath.Join(gvfsDir, e.Name())
+					if strings.Contains(nameLower, "nasa") || strings.Contains(nameLower, "music") {
+						candidates = append(candidates, filepath.Join(entryPath, "music"), entryPath)
+					}
 				}
 			}
 		}
@@ -100,7 +155,7 @@ func DetectMusicRoot() string {
 	}
 
 	for _, c := range candidates {
-		if info, err := os.Stat(c); err == nil && info.IsDir() {
+		if info, err := statWithTimeout(c, nasMountProbeTimeout); err == nil && info.IsDir() {
 			return c
 		}
 	}
@@ -110,15 +165,19 @@ func DetectMusicRoot() string {
 
 // ResolveSongPath maps a path stored in songs.json (e.g., "/Volumes/music/Artist/Album/Track.mp3")
 // onto the active local/NAS musicRoot when running across different operating systems.
+// This performs pure string prefix translation without per-file filesystem syscalls so large
+// libraries (10,000+ songs over SMB/NFS) resolve instantaneously at startup.
 func ResolveSongPath(rawPath, musicRoot string) string {
 	if rawPath == "" || musicRoot == "" {
 		return rawPath
 	}
-	if _, err := os.Stat(rawPath); err == nil {
+
+	slashPath := filepath.ToSlash(rawPath)
+	cleanRoot := strings.TrimRight(filepath.ToSlash(musicRoot), "/")
+	if cleanRoot != "" && strings.HasPrefix(slashPath, cleanRoot+"/") {
 		return rawPath
 	}
 
-	slashPath := filepath.ToSlash(rawPath)
 	for _, prefix := range knownNASPrefixes {
 		if strings.HasPrefix(slashPath, prefix) {
 			rel := strings.TrimPrefix(slashPath, prefix)
@@ -151,19 +210,26 @@ func ResolveSongs(songs []Song, musicRoot string) []Song {
 }
 
 // IsNASAvailable checks whether the musicRoot directory exists or any sample song path in songs is reachable.
+// Probes are bounded by a short timeout so an asleep or unresponsive SMB/NFS mount cannot hang startup.
 func IsNASAvailable(songs []Song, musicRoot string) bool {
 	if musicRoot != "" {
-		if info, err := os.Stat(musicRoot); err == nil && info.IsDir() {
+		info, err := statWithTimeout(musicRoot, nasMountProbeTimeout)
+		if err == nil && info.IsDir() {
 			return true
 		}
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			return false
+		}
 	}
-	limit := 10
+	limit := 3
 	if len(songs) < limit {
 		limit = len(songs)
 	}
 	for i := 0; i < limit; i++ {
-		if _, err := os.Stat(songs[i].Path); err == nil {
+		if _, err := statWithTimeout(songs[i].Path, nasFileProbeTimeout); err == nil {
 			return true
+		} else if errors.Is(err, os.ErrDeadlineExceeded) {
+			return false
 		}
 	}
 	return false

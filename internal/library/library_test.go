@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadAndSaveSchemaFormatting(t *testing.T) {
@@ -264,5 +265,25 @@ func TestResolveSongPathCrossOSAndFavorites(t *testing.T) {
 	favs, added = ToggleFavorite(loadedFavs, ytTrack)
 	if added || len(favs) != 0 {
 		t.Fatalf("expected second ToggleFavorite to remove track")
+	}
+
+	// Ensure ResolveSongs resolves 10,000+ NAS paths without per-file stat overhead
+	large := make([]Song, 10000)
+	for i := range large {
+		large[i] = Song{
+			Path:   "/Volumes/music/Artist/Album/Track.mp3",
+			Title:  "Track",
+			Artist: "Artist",
+			Album:  "Album",
+		}
+	}
+	start := time.Now()
+	resolved := ResolveSongs(large, tmpDir)
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("expected ResolveSongs on 10k songs to complete without disk I/O (<200ms), took %v", elapsed)
+	}
+	wantResolved := filepath.Join(tmpDir, "Artist", "Album", "Track.mp3")
+	if resolved[0].Path != wantResolved {
+		t.Fatalf("expected resolved path %q, got %q", wantResolved, resolved[0].Path)
 	}
 }

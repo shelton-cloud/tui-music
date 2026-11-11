@@ -50,9 +50,8 @@ Keybindings:
 }
 
 func runScan(args []string) int {
-	defaultRoot := library.DetectMusicRoot()
 	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
-	root := fs.String("root", defaultRoot, "Root directory to scan for audio files")
+	root := fs.String("root", "", "Root directory to scan for audio files (default auto-detected)")
 	limit := fs.Int("limit", 0, "Optional maximum number of songs to index (0 = no limit)")
 	out := fs.String("out", "songs.json", "Output JSON file path")
 	if err := fs.Parse(args); err != nil {
@@ -67,6 +66,9 @@ func runScan(args []string) int {
 	}
 
 	scanRoot := *root
+	if scanRoot == "" {
+		scanRoot = library.DetectMusicRoot()
+	}
 	if _, err := os.Stat(scanRoot); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Error: %s not found. Please ensure your NAS (e.g. smb://nasa.local/music) is mounted or pass --root <path>.\n", scanRoot)
 		return 1
@@ -104,7 +106,7 @@ func main() {
 	var musicRoot string
 	var showHelp bool
 	flag.StringVar(&songsPath, "songs", "songs.json", "Path to songs.json library index")
-	flag.StringVar(&musicRoot, "root", library.DetectMusicRoot(), "Active NAS/music mount directory")
+	flag.StringVar(&musicRoot, "root", "", "Active NAS/music mount directory (default auto-detected or $TUI_MUSIC_ROOT)")
 	flag.BoolVar(&showHelp, "help", false, "Show help")
 	flag.BoolVar(&showHelp, "h", false, "Show help")
 	flag.Usage = printUsage
@@ -125,11 +127,34 @@ func main() {
 		os.Exit(1)
 	}
 
-	mpvClient, err := player.Start()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to start mpv backend: %v\n", err)
+	type mpvResult struct {
+		client *player.Client
+		err    error
+	}
+	mpvCh := make(chan mpvResult, 1)
+	go func() {
+		c, err := player.Start()
+		mpvCh <- mpvResult{client: c, err: err}
+	}()
+
+	if musicRoot == "" {
+		musicRoot = library.DetectMusicRoot()
+	}
+
+	var songs []library.Song
+	if _, err := os.Stat(songsPath); err == nil {
+		if loaded, loadErr := library.Load(songsPath); loadErr == nil {
+			songs = library.ResolveSongs(loaded, musicRoot)
+		}
+	}
+	nasMounted := library.IsNASAvailable(songs, musicRoot)
+
+	mpvRes := <-mpvCh
+	if mpvRes.err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to start mpv backend: %v\n", mpvRes.err)
 		os.Exit(1)
 	}
+	mpvClient := mpvRes.client
 	defer func() {
 		_ = mpvClient.Close()
 	}()
@@ -142,16 +167,7 @@ func main() {
 		_ = mpvClient.Close()
 	}()
 
-	var songs []library.Song
-	if _, err := os.Stat(songsPath); err == nil {
-		if loaded, loadErr := library.Load(songsPath); loadErr == nil {
-			songs = library.ResolveSongs(loaded, musicRoot)
-		}
-	}
-
-	nasMounted := library.IsNASAvailable(songs, musicRoot)
-	model := ui.NewModel(mpvClient, songs, youtube.Search)
-	model.ConfigurePrimaryYTMusic(nasMounted)
+	model := ui.NewModelWithNAS(mpvClient, songs, youtube.Search, nasMounted)
 
 	prog := tea.NewProgram(model)
 	if _, err := prog.Run(); err != nil {

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	tea "charm.land/bubbletea/v2"
 
 	"tui-music/internal/library"
@@ -236,5 +237,75 @@ func TestYouTubePrimaryAutoRadioFavoritesAndLyrics(t *testing.T) {
 	view := m.View()
 	if !strings.Contains(view.Content, "Cruising through the CRT glow") {
 		t.Fatalf("expected active synced lyric line in View(), got:\n%s", view.Content)
+	}
+}
+
+func TestNewModelWithNASOfflineAndSearchPaste(t *testing.T) {
+	mp := newMockPlayer()
+	t.Setenv("TUI_MUSIC_FAVORITES", t.TempDir()+"/favorites.json")
+	songs := []library.Song{
+		{Path: "/Volumes/music/Artist/Album/Song1.mp3", Title: "Song 1", Artist: "Artist", Album: "Album"},
+	}
+
+	m := NewModelWithNAS(mp, songs, nil, false)
+	if len(mp.playedSources) != 0 {
+		t.Fatalf("expected no NAS playback attempts when nasMounted=false, got %v", mp.playedSources)
+	}
+	if len(m.queue.Items) != 0 {
+		t.Fatalf("expected empty queue when NAS is offline and no favorites exist, got %d", len(m.queue.Items))
+	}
+
+	// Open search modal with '/' and verify Bubble Tea v2 PasteMsg updates searchInput
+	m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	if !m.searchOpen {
+		t.Fatal("expected search modal to open")
+	}
+	m.Update(tea.PasteMsg{Content: "synthwave mix"})
+	if got := m.searchInput.Value(); got != "synthwave mix" {
+		t.Fatalf("expected pasted query 'synthwave mix', got %q", got)
+	}
+}
+
+func TestViewExactDimensionsAndBottomControlBar(t *testing.T) {
+	mp := newMockPlayer()
+	var songs []library.Song
+	for i := 0; i < 60; i++ {
+		songs = append(songs, library.Song{
+			Path:   "/music/Some Very Long Artist Folder Name/Some Very Long Album Folder Name/Track.mp3",
+			Title:  "A Very Long Synthwave Track Title With Extra Words",
+			Artist: "Some Very Long Artist Folder Name",
+			Album:  "Some Very Long Album Folder Name",
+		})
+	}
+
+	m := NewModel(mp, songs, nil)
+	sizes := [][2]int{
+		{60, 15},
+		{80, 24},
+		{100, 30},
+		{130, 40},
+	}
+
+	for _, sz := range sizes {
+		w, h := sz[0], sz[1]
+		m.Update(tea.WindowSizeMsg{Width: w, Height: h})
+		view := m.View()
+
+		gotH := lipgloss.Height(view.Content)
+		gotW := lipgloss.Width(view.Content)
+		if gotH != h {
+			t.Fatalf("size %dx%d: expected exact view height %d (so bottom control bar is never clipped), got %d", w, h, h, gotH)
+		}
+		if gotW > w {
+			t.Fatalf("size %dx%d: expected view width <= %d, got %d", w, h, w, gotW)
+		}
+
+		lines := strings.Split(view.Content, "\n")
+		bottomLine := lines[len(lines)-1]
+		for _, expectedBtn := range []string{"[/]", "[SPACE]", "[Q]"} {
+			if !strings.Contains(bottomLine, expectedBtn) {
+				t.Fatalf("size %dx%d: expected bottom control bar to contain %q, got %q", w, h, expectedBtn, bottomLine)
+			}
+		}
 	}
 }

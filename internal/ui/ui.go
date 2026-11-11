@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -220,6 +219,12 @@ type Model struct {
 
 // NewModel constructs the Bubble Tea Model with the provided player backend and song index.
 func NewModel(p PlayerBackend, songs []library.Song, searchFn SearchFunc) *Model {
+	return NewModelWithNAS(p, songs, searchFn, len(songs) > 0)
+}
+
+// NewModelWithNAS constructs the Bubble Tea Model with explicit NAS availability so
+// startup does not queue, stat, or play unmounted NAS tracks when nasMounted is false.
+func NewModelWithNAS(p PlayerBackend, songs []library.Song, searchFn SearchFunc, nasMounted bool) *Model {
 	if searchFn == nil {
 		searchFn = youtube.Search
 	}
@@ -230,13 +235,15 @@ func NewModel(p PlayerBackend, songs []library.Song, searchFn SearchFunc) *Model
 
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	q := library.NewQueue()
-	q.LoadInitialFromLibrary(songs, rng)
+	if nasMounted && len(songs) > 0 {
+		q.LoadInitialFromLibrary(songs, rng)
+	}
 
 	favPath := library.DefaultFavoritesPath()
 	favs, _ := library.LoadFavorites(favPath)
 
 	leftMode := modeNASTree
-	if len(songs) == 0 {
+	if !nasMounted || len(songs) == 0 {
 		leftMode = modeMixtape
 	}
 
@@ -257,7 +264,7 @@ func NewModel(p PlayerBackend, songs []library.Song, searchFn SearchFunc) *Model
 		queue:         q,
 		focus:         focusQueue,
 		leftMode:      leftMode,
-		nasMounted:    len(songs) > 0,
+		nasMounted:    nasMounted,
 		favorites:     favs,
 		favoritesPath: favPath,
 		autoRadio:     true,
@@ -271,6 +278,11 @@ func NewModel(p PlayerBackend, songs []library.Song, searchFn SearchFunc) *Model
 		waveHistory:   make([]float64, 100),
 		searchInput:   ti,
 		rng:           rng,
+	}
+
+	if !nasMounted {
+		m.ConfigurePrimaryYTMusic(false)
+		return m
 	}
 
 	if len(m.queue.Items) > 0 {
@@ -290,12 +302,13 @@ func (m *Model) ConfigurePrimaryYTMusic(nasMounted bool) {
 	m.nasMounted = nasMounted
 	if !nasMounted {
 		m.leftMode = modeMixtape
+		hadItems := len(m.queue.Items) > 0
 		// Clear unmounted NAS tracks from the startup queue so we don't queue unplayable paths
 		m.queue.Items = nil
 		m.queue.CurrentIndex = -1
 		m.queueIndex = 0
 		m.isPlaying = false
-		if m.player != nil {
+		if hadItems && m.player != nil {
 			_ = m.player.Stop()
 		}
 		if len(m.favorites) > 0 {
@@ -317,8 +330,7 @@ func (m *Model) ConfigurePrimaryYTMusic(nasMounted bool) {
 }
 
 func fileExists(p string) bool {
-	_, err := os.Stat(p)
-	return err == nil
+	return library.PathExistsFast(p)
 }
 
 // SetRadioFunc overrides the YouTube Music Auto-Radio fetcher (useful for testing).
@@ -461,6 +473,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateSearchModal(msg)
 		}
 		return m.updateMainView(msg)
+	}
+
+	if m.searchOpen {
+		var cmd tea.Cmd
+		prevVal := m.searchInput.Value()
+		m.searchInput, cmd = m.searchInput.Update(msg)
+		if m.searchInput.Value() != prevVal {
+			m.searchResults = nil
+		}
+		return m, cmd
 	}
 
 	return m, nil
@@ -661,8 +683,8 @@ func (m *Model) updateMainView(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.searchResults = nil
 		m.searchCursor = 0
 		m.searchInput.SetValue("")
-		m.searchInput.Focus()
-		return m, nil
+		cmd := m.searchInput.Focus()
+		return m, cmd
 
 	case "tab", "left", "right":
 		if m.focus == focusQueue {
@@ -773,10 +795,10 @@ func (m *Model) addTrackToQueue(track library.Track, playNow bool) {
 }
 
 func (m *Model) playTrack(index int) {
-	m.playTrackWithSkips(index, 0)
+	m.playTrackWithSkips(index, 0, -1)
 }
 
-func (m *Model) playTrackWithSkips(index int, skips int) {
+func (m *Model) playTrackWithSkips(index int, skips int, hasLocal int) {
 	if index < 0 || index >= len(m.queue.Items) {
 		return
 	}
@@ -794,11 +816,18 @@ func (m *Model) playTrackWithSkips(index int, skips int) {
 	// When running without the NAS mounted, we still update the UI and let mpv attempt playback if desired,
 	// unless the file was added as a raw missing path and alternatives exist.
 	if track.IsLocal && m.player != nil {
-		if _, err := os.Stat(track.Source); err != nil {
+		if !library.PathExistsFast(track.Source) {
+			if hasLocal < 0 {
+				if m.anyLocalFileExists() {
+					hasLocal = 1
+				} else {
+					hasLocal = 0
+				}
+			}
 			// Check if any file in the queue exists before skipping everything on an unmounted NAS
-			if m.anyLocalFileExists() && index+1 < len(m.queue.Items) {
+			if hasLocal == 1 && index+1 < len(m.queue.Items) && skips < 15 {
 				m.isTransitioning = false
-				m.playTrackWithSkips(index+1, skips+1)
+				m.playTrackWithSkips(index+1, skips+1, hasLocal)
 				return
 			}
 		}
@@ -828,11 +857,11 @@ func (m *Model) anyLocalFileExists() bool {
 		if !item.IsLocal {
 			return true
 		}
-		if _, err := os.Stat(item.Source); err == nil {
+		if library.PathExistsFast(item.Source) {
 			return true
 		}
 		checked++
-		if checked >= 10 {
+		if checked >= 5 {
 			break
 		}
 	}
@@ -1068,28 +1097,99 @@ func (m *Model) View() tea.View {
 		return view
 	}
 
-	breadcrumb := breadcrumbStyle.Width(m.width).Render(m.breadcrumb)
+	breadcrumb := breadcrumbStyle.
+		Width(m.width).
+		MaxHeight(1).
+		Render(truncateStr(m.breadcrumb, m.width-2))
 
-	// Calculate vertical split matching app.py (60% top library/queue panes, 40% NowPlaying)
-	availHeight := m.height - 2 // breadcrumb + status bar
-	if availHeight < 12 {
-		availHeight = 12
+	// Exact vertical budget so View() is always m.height rows (Bubble Tea v2 clips > m.height).
+	// NowPlaying renders 7 cassette rows (+ 2 wave rows when height >= 19) + 2 double-border rows = 11 (or 9) rows.
+	availHeight := m.height - 2 // 1 row breadcrumb + 1 row control bar
+	nowPlayingHeight := 11
+	if m.height < 19 {
+		nowPlayingHeight = 9
 	}
-	nowPlayingHeight := 10
 	topHeight := availHeight - nowPlayingHeight
-	if topHeight < 5 {
-		topHeight = 5
+	if topHeight < 4 {
+		topHeight = 4
 	}
 
 	topPane := m.renderTopPanes(m.width, topHeight)
 	nowPlaying := m.renderNowPlaying(m.width, nowPlayingHeight)
-
-	statusText := " 󰍉 [/] YT Search | [SPACE] Pause | [N/P] Track | [R] Radio | [F] Fav | [L] Lyrics | [-/+] Vol | [1/2] Source | [Q] Quit "
-	statusBar := statusBarStyle.Width(m.width).Render(truncateStr(statusText, m.width-2))
+	statusBar := m.renderControlBar(m.width)
 
 	view := tea.NewView(lipgloss.JoinVertical(lipgloss.Left, breadcrumb, topPane, nowPlaying, statusBar))
 	view.AltScreen = true
 	return view
+}
+
+func (m *Model) renderControlBar(totalWidth int) string {
+	type controlBtn struct {
+		key    string
+		label  string
+		active bool
+		accent bool
+	}
+
+	playLabel := "Play"
+	if m.isPlaying {
+		playLabel = "Pause"
+	}
+
+	quitBtn := controlBtn{key: "Q", label: "Quit", accent: true}
+	buttons := []controlBtn{
+		{key: "/", label: "Search"},
+		{key: "SPACE", label: playLabel},
+		{key: "N/P", label: "Track"},
+		{key: "R", label: "Radio", active: m.autoRadio},
+		{key: "F", label: "Fav"},
+		{key: "L", label: "Lyrics", active: m.showLyrics},
+		{key: "S", label: "Shuffle"},
+		{key: "-/+", label: "Vol"},
+		{key: "1/2", label: "Source"},
+	}
+
+	keyBase := lipgloss.NewStyle().Bold(true).Foreground(colorDarkBg).Background(colorPurple)
+	keyActive := lipgloss.NewStyle().Bold(true).Foreground(colorDarkBg).Background(colorPhosphor)
+	keyAccent := lipgloss.NewStyle().Bold(true).Foreground(colorDarkBg).Background(colorPink)
+	labelStyle := lipgloss.NewStyle().Bold(true).Foreground(colorCyan).Background(colorHeaderBg)
+	sepStyle := lipgloss.NewStyle().Background(colorHeaderBg)
+
+	renderBtn := func(b controlBtn) (string, int) {
+		ks := keyBase
+		if b.active {
+			ks = keyActive
+		} else if b.accent {
+			ks = keyAccent
+		}
+		keyText := "[" + b.key + "]"
+		lblText := " " + b.label + " "
+		rendered := ks.Render(keyText) + labelStyle.Render(lblText)
+		return rendered, lipgloss.Width(keyText) + lipgloss.Width(lblText)
+	}
+
+	quitRendered, quitWidth := renderBtn(quitBtn)
+	sep := sepStyle.Render(" ")
+
+	var parts []string
+	used := 1 + quitWidth // leading space + quit button
+	for _, b := range buttons {
+		rendered, w := renderBtn(b)
+		needed := w + 1 // button + 1 separator space
+		if used+needed > totalWidth-1 {
+			break
+		}
+		parts = append(parts, rendered)
+		used += needed
+	}
+	parts = append(parts, quitRendered)
+
+	row := sep + strings.Join(parts, sep)
+	rowWidth := lipgloss.Width(row)
+	if rowWidth < totalWidth {
+		row += sepStyle.Render(strings.Repeat(" ", totalWidth-rowWidth))
+	}
+	return lipgloss.NewStyle().MaxWidth(totalWidth).MaxHeight(1).Render(row)
 }
 
 func (m *Model) renderTopPanes(totalWidth, totalHeight int) string {
@@ -1112,25 +1212,32 @@ func (m *Model) renderTopPanes(totalWidth, totalHeight int) string {
 		queueHdrStyle = paneHeaderActiveStyle
 	}
 
+	// Lip Gloss v2 uses border-box sizing: Width and Height include the 2 border cells.
 	treeBoxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(treeBorderColor).
-		Width(leftWidth - 2).
-		Height(innerHeight)
+		Width(leftWidth).
+		Height(totalHeight).
+		MaxHeight(totalHeight)
 
 	queueBoxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(queueBorderColor).
-		Width(rightWidth - 2).
-		Height(innerHeight)
+		Width(rightWidth).
+		Height(totalHeight).
+		MaxHeight(totalHeight)
+
+	leftInnerWidth := max(4, leftWidth-2)
+	rightInnerWidth := max(4, rightWidth-2)
+	listRows := max(1, innerHeight-1)
 
 	var leftContent string
 	if m.leftMode == modeMixtape {
-		leftContent = m.renderMixtapeList(leftWidth-4, innerHeight-1, treeHdrStyle)
+		leftContent = m.renderMixtapeList(leftInnerWidth, listRows, treeHdrStyle)
 	} else {
-		leftContent = m.renderTreeList(leftWidth-4, innerHeight-1, treeHdrStyle)
+		leftContent = m.renderTreeList(leftInnerWidth, listRows, treeHdrStyle)
 	}
-	queueContent := m.renderQueueList(rightWidth-4, innerHeight-1, queueHdrStyle)
+	queueContent := m.renderQueueList(rightInnerWidth, listRows, queueHdrStyle)
 
 	return lipgloss.JoinHorizontal(
 		lipgloss.Top,
@@ -1144,17 +1251,17 @@ func (m *Model) renderMixtapeList(width, listHeight int, hdrStyle lipgloss.Style
 	if m.nasMounted {
 		nasTag = "NAS: READY [2]"
 	}
-	header := hdrStyle.Width(width).Render(truncateStr(fmt.Sprintf(" ★ YT MUSIC & MIXTAPE (%s) ", nasTag), width))
+	header := hdrStyle.Width(width).MaxHeight(1).Render(truncateStr(fmt.Sprintf("★ YT MUSIC & MIXTAPE (%s)", nasTag), width-2))
 	if listHeight < 1 {
 		return header
 	}
 	if len(m.favorites) == 0 {
 		hint := []string{
 			header,
-			lipgloss.NewStyle().Foreground(colorCyan).Render(" 󰍉 Press [/] to search YouTube Music"),
-			lipgloss.NewStyle().Foreground(colorMuted).Render(" ★ Press [F] on any track to dub it to your Mixtape"),
-			lipgloss.NewStyle().Foreground(colorMuted).Render(" 󰒝 Auto-Radio [R] automatically queues related YT songs"),
-			lipgloss.NewStyle().Foreground(colorMuted).Render(" 󰙅 Press [2] or [M] to switch to NAS Library Tree"),
+			lipgloss.NewStyle().Foreground(colorCyan).Render(truncateStr(" 󰍉 Press [/] to search YouTube Music", width)),
+			lipgloss.NewStyle().Foreground(colorMuted).Render(truncateStr(" ★ Press [F] on any track to dub it to your Mixtape", width)),
+			lipgloss.NewStyle().Foreground(colorMuted).Render(truncateStr(" 󰒝 Auto-Radio [R] automatically queues related YT songs", width)),
+			lipgloss.NewStyle().Foreground(colorMuted).Render(truncateStr(" 󰙅 Press [2] or [M] to switch to NAS Library Tree", width)),
 		}
 		if len(hint) > listHeight+1 {
 			hint = hint[:listHeight+1]
@@ -1174,7 +1281,7 @@ func (m *Model) renderMixtapeList(width, listHeight int, hdrStyle lipgloss.Style
 		}
 		line := truncateStr(fmt.Sprintf(" ★ %s %s - %s", badge, fav.Title, fav.Artist), width)
 		if i == m.mixtapeCursor && m.focus == focusTree {
-			line = cursorRowStyle.Width(width).Render(line)
+			line = cursorRowStyle.Width(width).MaxHeight(1).Render(line)
 		}
 		rows = append(rows, line)
 	}
@@ -1186,12 +1293,13 @@ func (m *Model) renderTreeList(width, listHeight int, hdrStyle lipgloss.Style) s
 	if !m.nasMounted {
 		mountBadge = " [UNMOUNTED]"
 	}
-	header := hdrStyle.Width(width).Render(truncateStr(" 󰙅 LIBRARY (Artist → Album → Track)"+mountBadge+" ", width))
+	header := hdrStyle.Width(width).MaxHeight(1).Render(truncateStr("󰙅 LIBRARY (Artist → Album → Track)"+mountBadge, width-2))
 	if listHeight < 1 {
 		return header
 	}
 	if len(m.tree.Visible) == 0 {
-		return header + "\n" + lipgloss.NewStyle().Foreground(colorMuted).Render(" (No songs loaded in songs.json — press [/] for YT Music)")
+		emptyMsg := truncateStr(" (No songs loaded in songs.json — press [/] for YT Music)", width)
+		return header + "\n" + lipgloss.NewStyle().Foreground(colorMuted).Render(emptyMsg)
 	}
 
 	start, end := visibleWindow(m.tree.Cursor, len(m.tree.Visible), listHeight)
@@ -1214,7 +1322,7 @@ func (m *Model) renderTreeList(width, listHeight int, hdrStyle lipgloss.Style) s
 		}
 		line := truncateStr(indent+icon+flat.Node.Label, width)
 		if i == m.tree.Cursor && m.focus == focusTree {
-			line = cursorRowStyle.Width(width).Render(line)
+			line = cursorRowStyle.Width(width).MaxHeight(1).Render(line)
 		}
 		rows = append(rows, line)
 	}
@@ -1226,12 +1334,13 @@ func (m *Model) renderQueueList(width, listHeight int, hdrStyle lipgloss.Style) 
 	if m.autoRadio {
 		radioTag = "RADIO:ON"
 	}
-	header := hdrStyle.Width(width).Render(truncateStr(fmt.Sprintf(" 󰎆 UPCOMING QUEUE (%d • %s) ", len(m.queue.Items), radioTag), width))
+	header := hdrStyle.Width(width).MaxHeight(1).Render(truncateStr(fmt.Sprintf("󰎆 UPCOMING QUEUE (%d • %s)", len(m.queue.Items), radioTag), width-2))
 	if listHeight < 1 {
 		return header
 	}
 	if len(m.queue.Items) == 0 {
-		return header + "\n" + lipgloss.NewStyle().Foreground(colorMuted).Render(" (Queue is empty — press [/] to search YouTube Music)")
+		emptyMsg := truncateStr(" (Queue is empty — press [/] to search YouTube Music)", width)
+		return header + "\n" + lipgloss.NewStyle().Foreground(colorMuted).Render(emptyMsg)
 	}
 
 	start, end := visibleWindow(m.queueIndex, len(m.queue.Items), listHeight)
@@ -1255,7 +1364,7 @@ func (m *Model) renderQueueList(width, listHeight int, hdrStyle lipgloss.Style) 
 		line := truncateStr(fmt.Sprintf("%s%s%s%s - %s", prefix, favStar, srcBadge, item.Title, item.Artist), width)
 		switch {
 		case i == m.queueIndex && m.focus == focusQueue:
-			line = cursorRowStyle.Width(width).Render(line)
+			line = cursorRowStyle.Width(width).MaxHeight(1).Render(line)
 		case i == m.queue.CurrentIndex:
 			line = currentTrackStyle.Render(line)
 		}
@@ -1275,10 +1384,13 @@ func (m *Model) renderNowPlaying(totalWidth, totalHeight int) string {
 		}
 	}
 	cassetteBlock := strings.Join(cassetteLines, "\n")
-	waveBlock := waveStyle.Render(RenderBrailleWave(m.waveHistory, 22, 2))
-	leftColumn := lipgloss.JoinVertical(lipgloss.Left, cassetteBlock, waveBlock)
+	leftColumn := cassetteBlock
+	if totalHeight >= 11 {
+		waveBlock := waveStyle.Render(RenderBrailleWave(m.waveHistory, 22, 2))
+		leftColumn = lipgloss.JoinVertical(lipgloss.Left, cassetteBlock, waveBlock)
+	}
 
-	infoWidth := totalWidth - 30
+	infoWidth := totalWidth - 28
 	if infoWidth < 20 {
 		infoWidth = 20
 	}
@@ -1310,7 +1422,7 @@ func (m *Model) renderNowPlaying(totalWidth, totalHeight int) string {
 	}
 	bar := renderProgressBar(pct, infoWidth-8)
 	timeStr := fmt.Sprintf("%s / %s", FormatTime(m.timePos), FormatTime(m.duration))
-	timeLine := artistStyle.Width(infoWidth).Align(lipgloss.Right).Render(timeStr)
+	timeLine := artistStyle.Width(infoWidth).MaxHeight(1).Align(lipgloss.Right).Render(timeStr)
 
 	middleBlock := ""
 	if m.showLyrics {
@@ -1321,10 +1433,13 @@ func (m *Model) renderNowPlaying(totalWidth, totalHeight int) string {
 		lipgloss.JoinVertical(lipgloss.Left, titleLine, artistLine, albumLine, middleBlock, bar, timeLine),
 	)
 
+	// Lip Gloss v2 uses border-box sizing: Width and Height include DoubleBorder.
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.DoubleBorder()).
 		BorderForeground(colorPhosphor).
-		Width(totalWidth - 2)
+		Width(totalWidth).
+		Height(totalHeight).
+		MaxHeight(totalHeight)
 
 	return boxStyle.Render(lipgloss.JoinHorizontal(lipgloss.Top, leftColumn, rightColumn))
 }
@@ -1374,12 +1489,17 @@ func (m *Model) renderSearchModal() string {
 		modalHeight = 12
 	}
 
-	title := lipgloss.NewStyle().Bold(true).Foreground(colorPink).Render("󰍉 SEARCH YOUTUBE MUSIC (PRIMARY STREAMING + AUTO-RADIO)")
+	innerWidth := max(20, modalWidth-4)
+	resultInnerWidth := max(16, innerWidth-2)
+
+	title := lipgloss.NewStyle().Bold(true).Foreground(colorPink).Render(
+		truncateStr("󰍉 SEARCH YOUTUBE MUSIC (PRIMARY STREAMING + AUTO-RADIO)", innerWidth),
+	)
 	inputView := m.searchInput.View()
-	statusView := lipgloss.NewStyle().Foreground(colorAmber).Render(m.searchStatus)
+	statusView := lipgloss.NewStyle().Foreground(colorAmber).Render(truncateStr(m.searchStatus, innerWidth))
 
 	var resultLines []string
-	maxResults := modalHeight - 8
+	maxResults := modalHeight - 10
 	if maxResults < 3 {
 		maxResults = 3
 	}
@@ -1390,9 +1510,9 @@ func (m *Model) renderSearchModal() string {
 		if r.Album != "" && r.Album != "YouTube Music" {
 			albumSuffix = " • " + r.Album
 		}
-		line := truncateStr(fmt.Sprintf("[%s] %s - %s%s", r.Duration, r.Title, r.Artist, albumSuffix), modalWidth-6)
+		line := truncateStr(fmt.Sprintf("[%s] %s - %s%s", r.Duration, r.Title, r.Artist, albumSuffix), resultInnerWidth-2)
 		if i == m.searchCursor {
-			line = cursorRowStyle.Width(modalWidth - 6).Render("▶ " + line)
+			line = cursorRowStyle.Width(resultInnerWidth).MaxHeight(1).Render("▶ " + line)
 		} else {
 			line = "  " + line
 		}
@@ -1404,11 +1524,14 @@ func (m *Model) renderSearchModal() string {
 	resultsBox := lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder()).
 		BorderForeground(colorCyan).
-		Width(modalWidth - 4).
-		Height(maxResults).
+		Width(innerWidth).
+		Height(maxResults + 2).
+		MaxHeight(maxResults + 2).
 		Render(strings.Join(resultLines, "\n"))
 
-	help := lipgloss.NewStyle().Foreground(colorPhosphor).Render(" 󰐊 [ENTER] Search / Play + Radio | [TAB] Queue Only | 󰒭 [UP/DOWN] Select | 󰈆 [ESC] Close ")
+	help := lipgloss.NewStyle().Foreground(colorPhosphor).Render(
+		truncateStr("󰐊 [ENTER] Search / Play + Radio | [TAB] Queue Only | 󰒭 [UP/DOWN] Select | 󰈆 [ESC] Close", innerWidth),
+	)
 
 	content := lipgloss.JoinVertical(lipgloss.Left, title, "", inputView, statusView, resultsBox, help)
 	modalBox := lipgloss.NewStyle().
@@ -1446,18 +1569,28 @@ func visibleWindow(cursor, total, height int) (int, int) {
 	return start, end
 }
 
-func truncateStr(s string, maxRunes int) string {
-	if maxRunes <= 0 {
+func truncateStr(s string, maxCols int) string {
+	if maxCols <= 0 {
 		return ""
 	}
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
+	if lipgloss.Width(s) <= maxCols {
 		return s
 	}
-	if maxRunes <= 1 {
-		return string(runes[:maxRunes])
+	if maxCols <= 1 {
+		return "…"
 	}
-	return string(runes[:maxRunes-1]) + "…"
+	target := maxCols - 1
+	var sb strings.Builder
+	cols := 0
+	for _, r := range s {
+		rw := lipgloss.Width(string(r))
+		if cols+rw > target {
+			break
+		}
+		sb.WriteRune(r)
+		cols += rw
+	}
+	return sb.String() + "…"
 }
 
 func nonEmpty(s, fallback string) string {
