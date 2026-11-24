@@ -214,6 +214,10 @@ type Model struct {
 	searchResults []youtube.Result
 	searchCursor  int
 
+	// Static 0-9 preset command strip state
+	activePreset  string
+	presetLoading string
+
 	rng *rand.Rand
 }
 
@@ -468,6 +472,37 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case presetResultsMsg:
+		if m.presetLoading == msg.preset.Key {
+			m.presetLoading = ""
+		}
+		if msg.err != nil {
+			m.breadcrumb = fmt.Sprintf("󰎆 PRESET [%s] %s • YT ERROR: %v", msg.preset.Key, strings.ToUpper(msg.preset.FullName), msg.err)
+			return m, nil
+		}
+		if len(msg.results) == 0 {
+			m.breadcrumb = fmt.Sprintf("󰎆 PRESET [%s] %s • NO TRACKS FOUND", msg.preset.Key, strings.ToUpper(msg.preset.FullName))
+			return m, nil
+		}
+		m.queue.Items = make([]library.Track, 0, len(msg.results))
+		m.queue.CurrentIndex = -1
+		m.queueIndex = 0
+		for _, r := range msg.results {
+			m.queue.Add(r.ToTrack(), false)
+		}
+		m.activePreset = msg.preset.Key
+		m.playTrack(0)
+		m.breadcrumb = formatPresetBreadcrumb(msg.preset, len(m.queue.Items), false)
+
+		var cmds []tea.Cmd
+		if m.autoRadio && len(m.queue.Items) > 0 && m.queue.Items[0].VideoID != "" {
+			cmds = append(cmds, m.fetchRadioCmd(m.queue.Items[0].VideoID))
+		}
+		if m.showLyrics {
+			cmds = append(cmds, m.fetchLyricsCmd(m.trackTitle, m.trackArtist))
+		}
+		return m, tea.Batch(cmds...)
+
 	case tea.KeyPressMsg:
 		if m.searchOpen {
 			return m.updateSearchModal(msg)
@@ -659,15 +694,8 @@ func (m *Model) updateMainView(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "1":
-		m.leftMode = modeMixtape
-		m.focus = focusTree
-		return m, nil
-
-	case "2":
-		m.leftMode = modeNASTree
-		m.focus = focusTree
-		return m, nil
+	case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		return m, m.actionTriggerPreset(msg.String())
 
 	case "m":
 		if m.leftMode == modeMixtape {
@@ -675,6 +703,7 @@ func (m *Model) updateMainView(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.leftMode = modeMixtape
 		}
+		m.focus = focusTree
 		return m, nil
 
 	case "/":
@@ -756,6 +785,46 @@ func (m *Model) actionAdjustVolume(delta float64) {
 		return
 	}
 	m.volume = math.Max(0, math.Min(130, m.volume+delta))
+}
+
+func (m *Model) actionTriggerPreset(key string) tea.Cmd {
+	preset, ok := FindPreset(key)
+	if !ok {
+		return nil
+	}
+
+	// Primary path when NAS is mounted: filter static library songs by preset keywords.
+	if m.nasMounted && len(m.allSongs) > 0 {
+		if matched := MatchPresetSongs(m.allSongs, preset, m.rng, maxPresetQueueTracks); len(matched) > 0 {
+			m.queue.Items = make([]library.Track, 0, len(matched))
+			m.queue.CurrentIndex = -1
+			m.queueIndex = 0
+			for _, s := range matched {
+				m.queue.Add(library.TrackFromSong(s), false)
+			}
+			m.activePreset = preset.Key
+			m.presetLoading = ""
+			m.playTrack(0)
+			m.breadcrumb = formatPresetBreadcrumb(preset, len(matched), true)
+			if m.showLyrics {
+				return m.fetchLyricsCmd(m.trackTitle, m.trackArtist)
+			}
+			return nil
+		}
+	}
+
+	// Fallback path when NAS is offline (or no local matches): stream from YouTube Music.
+	if m.searchFn == nil {
+		m.breadcrumb = fmt.Sprintf("󰎆 PRESET [%s] %s • NO TRACKS AVAILABLE", preset.Key, strings.ToUpper(preset.FullName))
+		return nil
+	}
+	m.presetLoading = preset.Key
+	m.breadcrumb = fmt.Sprintf("󰎆 PRESET [%s] %s • LOADING YT MUSIC...", preset.Key, strings.ToUpper(preset.FullName))
+	searchFn := m.searchFn
+	return func() tea.Msg {
+		res, err := searchFn(context.Background(), preset.YTQuery)
+		return presetResultsMsg{preset: preset, results: res, err: err}
+	}
 }
 
 func (m *Model) actionToggleFavorite() {
@@ -1104,21 +1173,27 @@ func (m *Model) View() tea.View {
 
 	// Exact vertical budget so View() is always m.height rows (Bubble Tea v2 clips > m.height).
 	// NowPlaying renders 7 cassette rows (+ 2 wave rows when height >= 19) + 2 double-border rows = 11 (or 9) rows.
-	availHeight := m.height - 2 // 1 row breadcrumb + 1 row control bar
+	// PresetStrip renders 3-row tactile TUI buttons when height >= 22 && width >= 80, else a 1-row compact bar.
+	presetStripHeight := 1
+	if m.height >= 22 && m.width >= 80 {
+		presetStripHeight = 3
+	}
+	availHeight := m.height - 2 - presetStripHeight // 1 row breadcrumb + 1 row control bar + preset strip
 	nowPlayingHeight := 11
 	if m.height < 19 {
 		nowPlayingHeight = 9
 	}
 	topHeight := availHeight - nowPlayingHeight
-	if topHeight < 4 {
-		topHeight = 4
+	if topHeight < 3 {
+		topHeight = 3
 	}
 
 	topPane := m.renderTopPanes(m.width, topHeight)
 	nowPlaying := m.renderNowPlaying(m.width, nowPlayingHeight)
+	presetStrip := m.renderPresetStrip(m.width, presetStripHeight)
 	statusBar := m.renderControlBar(m.width)
 
-	view := tea.NewView(lipgloss.JoinVertical(lipgloss.Left, breadcrumb, topPane, nowPlaying, statusBar))
+	view := tea.NewView(lipgloss.JoinVertical(lipgloss.Left, breadcrumb, topPane, nowPlaying, presetStrip, statusBar))
 	view.AltScreen = true
 	return view
 }
@@ -1146,7 +1221,7 @@ func (m *Model) renderControlBar(totalWidth int) string {
 		{key: "L", label: "Lyrics", active: m.showLyrics},
 		{key: "S", label: "Shuffle"},
 		{key: "-/+", label: "Vol"},
-		{key: "1/2", label: "Source"},
+		{key: "M", label: "Source"},
 	}
 
 	keyBase := lipgloss.NewStyle().Bold(true).Foreground(colorDarkBg).Background(colorPurple)
@@ -1249,7 +1324,7 @@ func (m *Model) renderTopPanes(totalWidth, totalHeight int) string {
 func (m *Model) renderMixtapeList(width, listHeight int, hdrStyle lipgloss.Style) string {
 	nasTag := "NAS: OFFLINE"
 	if m.nasMounted {
-		nasTag = "NAS: READY [2]"
+		nasTag = "NAS: READY [M]"
 	}
 	header := hdrStyle.Width(width).MaxHeight(1).Render(truncateStr(fmt.Sprintf("★ YT MUSIC & MIXTAPE (%s)", nasTag), width-2))
 	if listHeight < 1 {
@@ -1260,8 +1335,8 @@ func (m *Model) renderMixtapeList(width, listHeight int, hdrStyle lipgloss.Style
 			header,
 			lipgloss.NewStyle().Foreground(colorCyan).Render(truncateStr(" 󰍉 Press [/] to search YouTube Music", width)),
 			lipgloss.NewStyle().Foreground(colorMuted).Render(truncateStr(" ★ Press [F] on any track to dub it to your Mixtape", width)),
-			lipgloss.NewStyle().Foreground(colorMuted).Render(truncateStr(" 󰒝 Auto-Radio [R] automatically queues related YT songs", width)),
-			lipgloss.NewStyle().Foreground(colorMuted).Render(truncateStr(" 󰙅 Press [2] or [M] to switch to NAS Library Tree", width)),
+			lipgloss.NewStyle().Foreground(colorMuted).Render(truncateStr(" 󰒝 Press [0-9] to launch a Genre or Decade preset", width)),
+			lipgloss.NewStyle().Foreground(colorMuted).Render(truncateStr(" 󰙅 Press [M] to switch to NAS Library Tree", width)),
 		}
 		if len(hint) > listHeight+1 {
 			hint = hint[:listHeight+1]

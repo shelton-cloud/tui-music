@@ -54,7 +54,8 @@
 - **`D` / `X`:** Remove highlighted track from the queue.
 - **`-` / `+`:** Adjust volume ($\pm 5\%$).
 - **`,` / `.`:** Seek backward / forward ($\pm 5\text{s}$).
-- **`1` / `2` / `M`:** Switch Left Pane between YT Mixtape (`1`) and NAS Library Tree (`2`).
+- **`0`–`9`:** Hardware Preset Command Strip — Genres (`1` Rock, `2` Metal, `3` Indie, `4` Beats, `5` Lounge) and Decades (`6` 60s, `7` 70s, `8` 80s, `9` 90s, `0` 00s). Filters local NAS library when mounted, with automatic YouTube Music fallback when offline.
+- **`M`:** Switch Left Pane between YT Mixtape and NAS Library Tree.
 - **`TAB`:** Switch focus between Left Pane and Upcoming Queue.
 - **`Q`:** Quit application.
 

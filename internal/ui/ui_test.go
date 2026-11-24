@@ -309,3 +309,56 @@ func TestViewExactDimensionsAndBottomControlBar(t *testing.T) {
 		}
 	}
 }
+
+func TestPresetCommandStripLocalAndYTFallback(t *testing.T) {
+	mp := newMockPlayer()
+	songs := []library.Song{
+		{Path: "/music/Led Zeppelin/IV/Stairway.mp3", Title: "Stairway to Heaven", Artist: "Led Zeppelin", Album: "Led Zeppelin IV"},
+		{Path: "/music/Van Halen/1984/Jump.mp3", Title: "Jump", Artist: "Van Halen", Album: "1984"},
+		{Path: "/music/Metallica/Master/Battery.mp3", Title: "Battery", Artist: "Metallica", Album: "Master of Puppets"},
+		{Path: "/music/Daft Punk/Discovery/One More Time.mp3", Title: "One More Time", Artist: "Daft Punk", Album: "Discovery"},
+	}
+
+	var lastQuery string
+	m := NewModel(mp, songs, func(ctx context.Context, query string) ([]youtube.Result, error) {
+		lastQuery = query
+		return []youtube.Result{
+			{VideoID: "yt_80s_1", Title: "Take On Me", Artist: "a-ha", Album: "Hunting High and Low", Duration: "03:45"},
+		}, nil
+	})
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	// Press '7' -> 70s Classic Rock should match Led Zeppelin from static library
+	m.Update(tea.KeyPressMsg{Code: '7', Text: "7"})
+	if m.activePreset != "7" {
+		t.Fatalf("expected activePreset '7', got %q", m.activePreset)
+	}
+	if len(m.queue.Items) != 1 || m.queue.Items[0].Artist != "Led Zeppelin" {
+		t.Fatalf("expected 70s preset to queue Led Zeppelin, got %+v", m.queue.Items)
+	}
+
+	view := m.View()
+	for _, label := range []string{"ROCK", "METAL", "70s", "80s", "90s", "00s", "●"} {
+		if !strings.Contains(view.Content, label) {
+			t.Fatalf("expected preset command strip to contain %q", label)
+		}
+	}
+
+	// Switch to NAS offline and press '8' -> 80s should fall back to YouTube Music search
+	m.nasMounted = false
+	_, cmd := m.Update(tea.KeyPressMsg{Code: '8', Text: "8"})
+	if cmd == nil {
+		t.Fatalf("expected async YouTube fallback command when NAS is offline")
+	}
+	msg := cmd()
+	m.Update(msg)
+	if lastQuery == "" || !strings.Contains(strings.ToLower(lastQuery), "80s") {
+		t.Fatalf("expected YT fallback query for 80s preset, got %q", lastQuery)
+	}
+	if m.activePreset != "8" {
+		t.Fatalf("expected activePreset '8' after YT fallback, got %q", m.activePreset)
+	}
+	if len(m.queue.Items) != 1 || m.queue.Items[0].Title != "Take On Me" {
+		t.Fatalf("expected YT fallback track in queue, got %+v", m.queue.Items)
+	}
+}
