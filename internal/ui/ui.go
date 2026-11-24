@@ -77,18 +77,18 @@ var (
 	reelFrames = []string{"◐", "◓", "◑", "◒"}
 )
 
-// Retro CRT palette (Dracula + Phosphor Green & Amber CRT accents)
+// Catppuccin Mocha palette (https://catppuccin.com/palette)
 var (
-	colorBg       = lipgloss.Color("#282a36")
-	colorDarkBg   = lipgloss.Color("#1e1f29")
-	colorHeaderBg = lipgloss.Color("#343746")
-	colorPhosphor = lipgloss.Color("#50fa7b")
-	colorAmber    = lipgloss.Color("#ffb86c")
-	colorPink     = lipgloss.Color("#ff79c6")
-	colorCyan     = lipgloss.Color("#8be9fd")
-	colorPurple   = lipgloss.Color("#bd93f9")
-	colorMuted    = lipgloss.Color("#6272a4")
-	colorAlertRed = lipgloss.Color("#ff5555")
+	colorBg       = lipgloss.Color("#1e1e2e") // Base
+	colorDarkBg   = lipgloss.Color("#181825") // Mantle
+	colorHeaderBg = lipgloss.Color("#313244") // Surface0
+	colorPhosphor = lipgloss.Color("#a6e3a1") // Green
+	colorAmber    = lipgloss.Color("#fab387") // Peach
+	colorPink     = lipgloss.Color("#f5c2e7") // Pink
+	colorCyan     = lipgloss.Color("#89dceb") // Sky
+	colorPurple   = lipgloss.Color("#cba6f7") // Mauve
+	colorMuted    = lipgloss.Color("#6c7086") // Overlay0
+	colorAlertRed = lipgloss.Color("#f38ba8") // Red
 
 	breadcrumbStyle = lipgloss.NewStyle().
 			Background(colorHeaderBg).

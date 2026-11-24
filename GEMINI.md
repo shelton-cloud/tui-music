@@ -62,4 +62,4 @@
 ## Conventions
 - **YouTube Music Primary / NAS Secondary:** When the NAS mount is unavailable at startup, `tuimusic` starts cleanly in YouTube Music & Mixtape mode without queueing unplayable local paths.
 - **Metadata Priority:** YouTube streams preserve clean YT Music `Title`, `Artist`, and `Album` metadata over raw `mpv` stream filenames. Local files use embedded tags first, falling back to directory/filename structure.
-- **Visuals:** Double-line box drawing, CRT phosphor accents, and animated reels (`◐`, `◓`, `◑`, `◒`) define the "Cassette" aesthetic.
+- **Visuals:** Catppuccin Mocha color theme, double-line box drawing, and animated reels (`◐`, `◓`, `◑`, `◒`) define the "Cassette" aesthetic.
