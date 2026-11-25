@@ -1,5 +1,12 @@
 # TUI Music Player (`tuimusic`) 🎵
 
+![Go](https://shields.sheltsville.com/badge/Go-1.22%2B-00ADD8?style=flat-square&logo=go&logoColor=white)
+![Bubble Tea](https://shields.sheltsville.com/badge/UI-Bubble_Tea_TUI-FF75B5?style=flat-square)
+![Zero-CGO](https://shields.sheltsville.com/badge/Build-Zero--CGO_Static-10B981?style=flat-square)
+![Platform](https://shields.sheltsville.com/badge/Platform-Linux_%7C_macOS-4B5563?style=flat-square)
+
+[![Tech Stack](https://skillicons.sheltsville.com/icons?i=go,linux,apple,bash)](https://skillicons.sheltsville.com)
+
 A retro-styled CRT terminal music player built in **Go** ([Bubble Tea](https://github.com/charmbracelet/bubbletea) + [Lip Gloss](https://github.com/charmbracelet/lipgloss)) with **YouTube Music** as the primary streaming & discovery engine and **local NAS playback** (`nasa.local/music`) as a seamless secondary source.
 
 ## Features
